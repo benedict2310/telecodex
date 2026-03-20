@@ -1,0 +1,17 @@
+services:
+  telecodex:
+    build: .
+    env_file: .env
+    volumes:
+      - ${HOME}/.codex:/home/telecodex/.codex:rw
+      - ./workspace:/workspace:rw
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: "2.0"
+    restart: unless-stopped
