@@ -7,6 +7,14 @@ import {
 } from "@openai/codex-sdk";
 
 import type { TeleCodexConfig } from "./config.js";
+import {
+  getThread,
+  listModels,
+  listThreads,
+  listWorkspaces,
+  type CodexModelRecord,
+  type CodexThreadRecord,
+} from "./codex-state.js";
 
 export interface CodexSessionCallbacks {
   onTextDelta: (delta: string) => void;
@@ -28,6 +36,7 @@ export class CodexSessionService {
   private currentWorkspace: string;
   private abortController: AbortController | null = null;
   private currentThreadId: string | null = null;
+  private currentModel: string | undefined;
 
   private constructor(private readonly config: TeleCodexConfig) {
     this.currentWorkspace = config.workspace;
@@ -50,7 +59,7 @@ export class CodexSessionService {
     return {
       threadId: this.thread?.id ?? this.currentThreadId,
       workspace: this.currentWorkspace,
-      model: this.config.codexModel,
+      model: this.currentModel ?? this.config.codexModel,
     };
   }
 
@@ -171,13 +180,17 @@ export class CodexSessionService {
     this.abortController?.abort();
   }
 
-  async newThread(workspace?: string): Promise<CodexSessionInfo> {
+  async newThread(workspace?: string, model?: string): Promise<CodexSessionInfo> {
     this.ensureIdle("start a new thread");
 
     const effectiveWorkspace = workspace ?? this.currentWorkspace;
-    this.thread = this.codex.startThread(this.buildThreadOptions(effectiveWorkspace));
+    const effectiveModel = model ?? this.currentModel;
+    this.thread = this.codex.startThread(this.buildThreadOptions(effectiveWorkspace, effectiveModel));
     this.currentWorkspace = effectiveWorkspace;
     this.currentThreadId = this.thread.id ?? null;
+    if (model) {
+      this.currentModel = model;
+    }
     return this.getInfo();
   }
 
@@ -189,6 +202,48 @@ export class CodexSessionService {
     return this.getInfo();
   }
 
+  async switchSession(threadId: string): Promise<CodexSessionInfo> {
+    this.ensureIdle("switch session");
+
+    const record = getThread(threadId);
+    const workspace = record?.cwd ?? this.currentWorkspace;
+    const model = record?.model || undefined;
+
+    this.thread = this.codex.resumeThread(threadId, this.buildThreadOptions(workspace, model));
+    this.currentWorkspace = workspace;
+    this.currentThreadId = threadId;
+    if (model) {
+      this.currentModel = model;
+    }
+    return this.getInfo();
+  }
+
+  listAllSessions(limit?: number): CodexThreadRecord[] {
+    return listThreads(limit ?? 20);
+  }
+
+  listWorkspaces(): string[] {
+    return listWorkspaces();
+  }
+
+  listModels(): CodexModelRecord[] {
+    return listModels();
+  }
+
+  setModel(slug: string): string {
+    this.currentModel = slug;
+    return slug;
+  }
+
+  handback(): { threadId: string | null; workspace: string } {
+    const info = { threadId: this.currentThreadId, workspace: this.currentWorkspace };
+    this.abortController?.abort();
+    this.abortController = null;
+    this.thread = null;
+    this.currentThreadId = null;
+    return info;
+  }
+
   dispose(): void {
     this.abortController?.abort();
     this.abortController = null;
@@ -196,15 +251,17 @@ export class CodexSessionService {
     this.currentThreadId = null;
   }
 
-  private buildThreadOptions(workspace: string): {
+  private buildThreadOptions(workspace: string, model?: string): {
     model?: string;
     sandboxMode: SandboxMode;
     workingDirectory: string;
     approvalPolicy: ApprovalMode;
     skipGitRepoCheck: true;
   } {
+    const effectiveModel = model ?? this.currentModel ?? this.config.codexModel;
+
     return {
-      model: this.config.codexModel,
+      model: effectiveModel,
       sandboxMode: this.config.codexSandboxMode,
       workingDirectory: workspace,
       approvalPolicy: this.config.codexApprovalPolicy,

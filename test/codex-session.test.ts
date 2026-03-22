@@ -2,6 +2,30 @@ import { vi } from "vitest";
 
 import type { TeleCodexConfig } from "../src/config.js";
 
+const mockCodexState = vi.hoisted(() => {
+  const getThread = vi.fn();
+  const listThreads = vi.fn().mockReturnValue([]);
+  const listWorkspaces = vi.fn().mockReturnValue([]);
+  const listModels = vi.fn().mockReturnValue([]);
+
+  return {
+    getThread,
+    listThreads,
+    listWorkspaces,
+    listModels,
+    reset: () => {
+      getThread.mockReset();
+      getThread.mockReturnValue(null);
+      listThreads.mockReset();
+      listThreads.mockReturnValue([]);
+      listWorkspaces.mockReset();
+      listWorkspaces.mockReturnValue([]);
+      listModels.mockReset();
+      listModels.mockReturnValue([]);
+    },
+  };
+});
+
 const mockState = vi.hoisted(() => {
   const createdCodexOptions: any[] = [];
   const codexInstances: any[] = [];
@@ -54,6 +78,13 @@ vi.mock("@openai/codex-sdk", () => ({
   Codex: mockState.Codex,
 }));
 
+vi.mock("../src/codex-state.js", () => ({
+  getThread: mockCodexState.getThread,
+  listThreads: mockCodexState.listThreads,
+  listWorkspaces: mockCodexState.listWorkspaces,
+  listModels: mockCodexState.listModels,
+}));
+
 import { CodexSessionService } from "../src/codex-session.js";
 
 describe("CodexSessionService", () => {
@@ -93,6 +124,7 @@ describe("CodexSessionService", () => {
 
   beforeEach(() => {
     mockState.reset();
+    mockCodexState.reset();
   });
 
   it("creates the service and starts an initial thread", async () => {
@@ -190,7 +222,6 @@ describe("CodexSessionService", () => {
     expect(callbacks.onToolStart).toHaveBeenCalledWith("ls -la", "cmd-1");
     expect(callbacks.onToolUpdate).toHaveBeenCalledWith("cmd-1", "file-a\nfile-b");
     expect(callbacks.onToolEnd).toHaveBeenCalledWith("cmd-1", false);
-    // Only one onToolUpdate call: item.completed carries the same output, no delta
     expect(callbacks.onToolUpdate).toHaveBeenCalledTimes(1);
   });
 
@@ -227,7 +258,6 @@ describe("CodexSessionService", () => {
             id: "cmd-2",
             type: "command_execution",
             command: "make build",
-            // Cumulative — contains both lines
             aggregated_output: "compiling...\nlinking...\n",
             status: "in_progress",
           },
@@ -249,7 +279,6 @@ describe("CodexSessionService", () => {
     await service.prompt("build", callbacks);
 
     expect(callbacks.onToolStart).toHaveBeenCalledWith("make build", "cmd-2");
-    // Each call should receive only the new portion, not the cumulative output
     expect(callbacks.onToolUpdate.mock.calls).toEqual([
       ["cmd-2", "compiling...\n"],
       ["cmd-2", "linking...\n"],
@@ -275,7 +304,6 @@ describe("CodexSessionService", () => {
             status: "in_progress",
           },
         },
-        // No item.updated — output only present in item.completed
         {
           type: "item.completed",
           item: {
@@ -431,5 +459,156 @@ describe("CodexSessionService", () => {
       workspace: "/workspace/base",
       model: "o3",
     });
+  });
+
+  it("switchSession looks up workspace and model from codex state", async () => {
+    mockCodexState.getThread.mockReturnValue({
+      id: "thread-abc",
+      title: "Saved thread",
+      cwd: "/workspace/from-db",
+      model: "gpt-5.4-mini",
+      createdAt: new Date("2025-01-01T00:00:00.000Z"),
+      updatedAt: new Date("2025-01-02T00:00:00.000Z"),
+      firstUserMessage: "hello",
+    });
+
+    const service = await CodexSessionService.create(createConfig());
+    const codexInstance = mockState.codexInstances[0];
+
+    const info = await service.switchSession("thread-abc");
+
+    expect(mockCodexState.getThread).toHaveBeenCalledWith("thread-abc");
+    expect(codexInstance.resumeThread).toHaveBeenLastCalledWith("thread-abc", {
+      model: "gpt-5.4-mini",
+      sandboxMode: "workspace-write",
+      workingDirectory: "/workspace/from-db",
+      approvalPolicy: "never",
+      skipGitRepoCheck: true,
+    });
+    expect(info).toEqual({
+      threadId: "thread-abc",
+      workspace: "/workspace/from-db",
+      model: "gpt-5.4-mini",
+    });
+  });
+
+  it("switchSession throws when a turn is in progress", async () => {
+    const service = await CodexSessionService.create(createConfig());
+    const thread = mockState.createdThreads[0];
+    const callbacks = createCallbacks();
+
+    let release!: () => void;
+    const blocker = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    thread.runStreamed.mockImplementationOnce(async () => ({
+      events: (async function* () {
+        await blocker;
+      })(),
+    }));
+
+    const promptPromise = service.prompt("busy", callbacks);
+    await Promise.resolve();
+
+    await expect(service.switchSession("thread-busy")).rejects.toThrow(
+      "Cannot switch session while a turn is in progress",
+    );
+
+    await service.abort();
+    release();
+    await promptPromise.catch(() => {});
+  });
+
+  it("newThread accepts an explicit model override and updates getInfo", async () => {
+    const service = await CodexSessionService.create(createConfig());
+    const codexInstance = mockState.codexInstances[0];
+
+    const info = await service.newThread(undefined, "gpt-5.4");
+
+    expect(codexInstance.startThread).toHaveBeenLastCalledWith({
+      model: "gpt-5.4",
+      sandboxMode: "workspace-write",
+      workingDirectory: "/workspace/base",
+      approvalPolicy: "never",
+      skipGitRepoCheck: true,
+    });
+    expect(info.model).toBe("gpt-5.4");
+    expect(service.getInfo().model).toBe("gpt-5.4");
+  });
+
+  it("setModel updates the tracked model returned by getInfo", async () => {
+    const service = await CodexSessionService.create(createConfig());
+
+    expect(service.setModel("o4-mini")).toBe("o4-mini");
+    expect(service.getInfo().model).toBe("o4-mini");
+  });
+
+  it("handback clears the active thread and returns thread id plus workspace", async () => {
+    const service = await CodexSessionService.create(createConfig());
+    const thread = mockState.createdThreads[0];
+    const callbacks = createCallbacks();
+
+    thread.runStreamed.mockResolvedValueOnce({
+      events: streamEvents([{ type: "thread.started", thread_id: "thread-live" }, { type: "turn.completed", usage }]),
+    });
+
+    await service.prompt("hello", callbacks);
+
+    expect(service.handback()).toEqual({
+      threadId: "thread-live",
+      workspace: "/workspace/base",
+    });
+    expect(service.hasActiveThread()).toBe(false);
+    expect(service.getInfo()).toEqual({
+      threadId: null,
+      workspace: "/workspace/base",
+      model: "o3",
+    });
+  });
+
+  it("listAllSessions delegates to codex-state", async () => {
+    mockCodexState.listThreads.mockReturnValue([
+      {
+        id: "thread-1",
+        title: "One",
+        cwd: "/workspace/a",
+        model: "o3",
+        createdAt: new Date("2025-01-01T00:00:00.000Z"),
+        updatedAt: new Date("2025-01-02T00:00:00.000Z"),
+        firstUserMessage: "hello",
+      },
+    ]);
+
+    const service = await CodexSessionService.create(createConfig());
+
+    expect(service.listAllSessions(5)).toEqual([
+      expect.objectContaining({ id: "thread-1", cwd: "/workspace/a" }),
+    ]);
+    expect(mockCodexState.listThreads).toHaveBeenCalledWith(5);
+  });
+
+  it("listWorkspaces delegates to codex-state", async () => {
+    mockCodexState.listWorkspaces.mockReturnValue(["/workspace/a", "/workspace/b"]);
+
+    const service = await CodexSessionService.create(createConfig());
+
+    expect(service.listWorkspaces()).toEqual(["/workspace/a", "/workspace/b"]);
+    expect(mockCodexState.listWorkspaces).toHaveBeenCalledTimes(1);
+  });
+
+  it("listModels delegates to codex-state", async () => {
+    mockCodexState.listModels.mockReturnValue([
+      { slug: "gpt-5.4", displayName: "GPT-5.4" },
+      { slug: "o3", displayName: "o3" },
+    ]);
+
+    const service = await CodexSessionService.create(createConfig());
+
+    expect(service.listModels()).toEqual([
+      { slug: "gpt-5.4", displayName: "GPT-5.4" },
+      { slug: "o3", displayName: "o3" },
+    ]);
+    expect(mockCodexState.listModels).toHaveBeenCalledTimes(1);
   });
 });

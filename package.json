@@ -16,9 +16,14 @@
     "grammy": "^1.41.1"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.0",
     "@types/node": "^25.5.0",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
     "vitest": "^3.2.4"
+  },
+  "optionalDependencies": {
+    "better-sqlite3": "^11.0.0",
+    "parakeet-coreml": "^2.2.0"
   }
 }
