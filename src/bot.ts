@@ -5,8 +5,9 @@ import path from "node:path";
 
 import { autoRetry } from "@grammyjs/auto-retry";
 import { Bot, InlineKeyboard, type Context } from "grammy";
+import type { ModelReasoningEffort } from "@openai/codex-sdk";
 
-import { type CodexSessionInfo, type CodexSessionService } from "./codex-session.js";
+import { type CodexSessionCallbacks, type CodexSessionInfo, type CodexSessionService } from "./codex-session.js";
 import type { TeleCodexConfig, ToolVerbosity } from "./config.js";
 import { escapeHTML, formatTelegramHTML } from "./format.js";
 import { getAvailableBackends, transcribeAudio } from "./voice.js";
@@ -80,7 +81,11 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
     }
   };
 
-  const handleUserPrompt = async (ctx: Context, chatId: TelegramChatId, userText: string): Promise<void> => {
+  const handleUserPrompt = async (
+    ctx: Context,
+    chatId: TelegramChatId,
+    userInput: string | { text?: string; imagePaths?: string[] },
+  ): Promise<void> => {
     if (isBusy()) {
       await sendBusyReply(ctx);
       return;
@@ -101,6 +106,10 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
     let isFlushing = false;
     let flushPending = false;
     let finalized = false;
+    let planMessageId: number | undefined;
+    let lastRenderedPlan = "";
+    let planMessageSending = false;
+    let lastTurnUsage: { inputTokens: number; cachedInputTokens: number; outputTokens: number } | undefined;
 
     const typingInterval = setInterval(() => {
       void bot.api.sendChatAction(chatId, "typing").catch(() => {});
@@ -124,17 +133,24 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
     };
 
     const buildFinalResponseText = (text: string): string => {
-      if (toolVerbosity !== "summary") {
-        return text.trim();
-      }
-
-      const summaryLine = formatToolSummaryLine(toolCounts);
       const trimmedText = text.trim();
-      if (!summaryLine) {
-        return trimmedText;
+      const usageLine = lastTurnUsage ? formatTurnUsageLine(lastTurnUsage) : "";
+
+      if (toolVerbosity === "summary") {
+        const footerLines = [formatToolSummaryLine(toolCounts), usageLine].filter((line): line is string => Boolean(line));
+        if (footerLines.length === 0) {
+          return trimmedText;
+        }
+
+        const footer = footerLines.join("\n");
+        return trimmedText ? `${trimmedText}\n\n${footer}` : footer;
       }
 
-      return trimmedText ? `${trimmedText}\n\n${summaryLine}` : summaryLine;
+      if (toolVerbosity === "all" && usageLine) {
+        return trimmedText ? `${trimmedText}\n\n${usageLine}` : usageLine;
+      }
+
+      return trimmedText;
     };
 
     const ensureResponseMessage = async (): Promise<void> => {
@@ -298,7 +314,7 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
       await deliverRenderedChunks(splitMarkdownForTelegram(finalText));
     };
 
-    const callbacks = {
+    const callbacks: CodexSessionCallbacks = {
       onTextDelta: (delta: string) => {
         accumulatedText += delta;
         if (!responseMessageId) {
@@ -400,6 +416,39 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
           console.error(`Failed to update tool message for ${state.toolName}`, error);
         });
       },
+      onTodoUpdate: (items) => {
+        if (toolVerbosity === "none") {
+          return;
+        }
+
+        const rendered = renderTodoList(items);
+        if (rendered === lastRenderedPlan) {
+          return;
+        }
+
+        lastRenderedPlan = rendered;
+        if (!planMessageId) {
+          if (planMessageSending) return; // drop concurrent sends; next update will reflect latest state
+          planMessageSending = true;
+          void sendTextMessage(bot.api, chatId, rendered, { parseMode: "HTML" })
+            .then((msg) => {
+              planMessageId = msg.message_id;
+            })
+            .catch((err) => {
+              console.error("Failed to send plan message", err);
+            })
+            .finally(() => {
+              planMessageSending = false;
+            });
+        } else {
+          void safeEditMessage(bot, chatId, planMessageId, rendered, { parseMode: "HTML" }).catch((err) => {
+            console.error("Failed to update plan message", err);
+          });
+        }
+      },
+      onTurnComplete: (usage) => {
+        lastTurnUsage = usage;
+      },
       onAgentEnd: () => {
         void finalizeResponse().catch((error) => {
           console.error("Failed to finalize Telegram response message", error);
@@ -412,7 +461,7 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
         return;
       }
 
-      await codexSession.prompt(userText, callbacks);
+      await codexSession.prompt(userInput, callbacks);
       await finalizeResponse();
     } catch (error) {
       stopTyping();
@@ -468,6 +517,7 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
       "",
       "Send any text message to continue the current Codex thread from Telegram.",
       "Send a voice message or audio file to transcribe it into a Codex prompt.",
+      "Send a photo (with optional caption) to show Codex an image.",
       `Voice: ${voiceStatus}`,
       "",
       renderSessionInfoPlain(info),
@@ -477,6 +527,7 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
       "",
       "Send any text message to continue the current Codex thread from Telegram.",
       "Send a voice message or audio file to transcribe it into a Codex prompt.",
+      "Send a photo (with optional caption) to show Codex an image.",
       `<b>Voice:</b> <code>${escapeHTML(voiceStatus)}</code>`,
       "",
       renderSessionInfoHTML(info),
@@ -838,6 +889,25 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
     );
   });
 
+  bot.command("effort", async (ctx) => {
+    const efforts: ModelReasoningEffort[] = ["minimal", "low", "medium", "high", "xhigh"];
+    const current = codexSession.getInfo().reasoningEffort;
+    const keyboard = buildGridKeyboard(
+      efforts.map((effort) => ({
+        label: effort === current ? `${effort} ✓` : effort,
+        callbackData: `effort_${effort}`,
+      })),
+      3,
+    );
+    const text = current
+      ? `<b>Reasoning effort:</b> <code>${escapeHTML(current)}</code>\n\nSelect for new threads:`
+      : `<b>Reasoning effort:</b> not set (model default)\n\nSelect for new threads:`;
+    await safeReply(ctx, text, {
+      fallbackText: text.replace(/<[^>]+>/g, ""),
+      replyMarkup: keyboard,
+    });
+  });
+
   bot.callbackQuery("codex_abort", async (ctx) => {
     await ctx.answerCallbackQuery({ text: "Aborting..." });
     await codexSession.abort();
@@ -982,6 +1052,23 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
     }
   });
 
+  bot.callbackQuery(/^effort_(minimal|low|medium|high|xhigh)$/, async (ctx) => {
+    const chatId = ctx.chat?.id;
+    const messageId = ctx.callbackQuery.message?.message_id;
+    const effort = ctx.match?.[1] as ModelReasoningEffort | undefined;
+
+    if (!chatId || !messageId || !effort) {
+      return;
+    }
+
+    await ctx.answerCallbackQuery({ text: `Effort set to ${effort}` });
+    codexSession.setReasoningEffort(effort);
+    const html = `⚡ Reasoning effort set to <code>${escapeHTML(effort)}</code> — applies to new threads.`;
+    await safeEditMessage(bot, chatId, messageId, html, {
+      fallbackText: `⚡ Reasoning effort set to ${effort} — applies to new threads.`,
+    });
+  });
+
   bot.callbackQuery(/^newmodel_(.+)$/, async (ctx) => {
     const chatId = ctx.chat?.id;
     const messageId = ctx.callbackQuery.message?.message_id;
@@ -1092,6 +1179,51 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
     await handleUserPrompt(ctx, chatId, transcript);
   });
 
+  bot.on("message:photo", async (ctx) => {
+    const chatId = ctx.chat.id;
+    if (isBusy()) {
+      await sendBusyReply(ctx);
+      return;
+    }
+
+    const photos = ctx.message.photo;
+    const photo = photos[photos.length - 1];
+    if (!photo) {
+      return;
+    }
+
+    isTranscribing = true;
+    let tempFilePath: string | undefined;
+
+    try {
+      await ctx.api.sendChatAction(chatId, "upload_photo");
+      tempFilePath = await downloadTelegramFile(ctx.api, config.telegramBotToken, photo.file_id, 20 * 1024 * 1024);
+    } catch (error) {
+      await safeReply(ctx, `<b>Failed to download photo:</b> ${escapeHTML(formatError(error))}`, {
+        fallbackText: `Failed to download photo: ${formatError(error)}`,
+      });
+      return;
+    } finally {
+      isTranscribing = false;
+      if (!tempFilePath) {
+        // Download failed — nothing to clean up further
+      }
+    }
+
+    // tempFilePath is set; process it outside the download try/catch so Codex
+    // errors surface with their own messages rather than "Failed to download photo".
+    const caption = ctx.message.caption?.trim();
+    const promptInput: { text?: string; imagePaths: string[] } = { imagePaths: [tempFilePath] };
+    if (caption) {
+      promptInput.text = caption;
+    }
+    try {
+      await handleUserPrompt(ctx, chatId, promptInput);
+    } finally {
+      await unlink(tempFilePath).catch(() => {});
+    }
+  });
+
   bot.catch((error) => {
     const message = error.error instanceof Error ? error.error.message : String(error.error);
     console.error("Telegram bot error:", message);
@@ -1111,6 +1243,7 @@ export async function registerCommands(bot: Bot<Context>): Promise<void> {
     { command: "sessions", description: "Browse and switch recent threads" },
     { command: "switch", description: "Switch to a thread by ID" },
     { command: "model", description: "View and change model" },
+    { command: "effort", description: "Set reasoning effort (minimal/low/medium/high/xhigh)" },
     { command: "voice", description: "Check voice transcription status" },
   ]);
 }
@@ -1120,6 +1253,8 @@ function renderSessionInfoPlain(info: CodexSessionInfo): string {
     `Thread ID: ${info.threadId ?? "(not started yet)"}`,
     `Workspace: ${info.workspace}`,
     info.model ? `Model: ${info.model}` : undefined,
+    info.reasoningEffort ? `Reasoning effort: ${info.reasoningEffort}` : undefined,
+    info.sessionTokens ? formatSessionTokensPlain(info.sessionTokens) : undefined,
   ]
     .filter((line): line is string => Boolean(line))
     .join("\n");
@@ -1130,6 +1265,8 @@ function renderSessionInfoHTML(info: CodexSessionInfo): string {
     `<b>Thread ID:</b> <code>${escapeHTML(info.threadId ?? "(not started yet)")}</code>`,
     `<b>Workspace:</b> <code>${escapeHTML(info.workspace)}</code>`,
     info.model ? `<b>Model:</b> <code>${escapeHTML(info.model)}</code>` : undefined,
+    info.reasoningEffort ? `<b>Reasoning effort:</b> <code>${escapeHTML(info.reasoningEffort)}</code>` : undefined,
+    info.sessionTokens ? `<b>Session tokens:</b> <code>${escapeHTML(formatSessionTokensValue(info.sessionTokens))}</code>` : undefined,
   ]
     .filter((line): line is string => Boolean(line))
     .join("\n");
@@ -1176,6 +1313,26 @@ function formatToolSummaryLine(toolCounts: Map<string, number>): string {
     .map(([name, count]) => (count === 1 ? name : `${name} ×${count}`))
     .join(", ");
   return `🔧 ${totalCount} ${label}: ${tools}`;
+}
+
+function renderTodoList(items: Array<{ text: string; completed: boolean }>): string {
+  const lines = items.map((item) => {
+    const icon = item.completed ? "✅" : "⬜";
+    return `${icon} ${escapeHTML(item.text)}`;
+  });
+  return `📋 <b>Plan</b>\n${lines.join("\n")}`;
+}
+
+function formatTurnUsageLine(usage: { inputTokens: number; cachedInputTokens: number; outputTokens: number }): string {
+  return `🪙 in: ${usage.inputTokens} · cached: ${usage.cachedInputTokens} · out: ${usage.outputTokens}`;
+}
+
+function formatSessionTokensValue(tokens: { input: number; cached: number; output: number }): string {
+  return `in: ${tokens.input} · cached: ${tokens.cached} · out: ${tokens.output}`;
+}
+
+function formatSessionTokensPlain(tokens: { input: number; cached: number; output: number }): string {
+  return `Session tokens: ${formatSessionTokensValue(tokens)}`;
 }
 
 async function safeReply(ctx: Context, text: string, options: TextOptions = {}): Promise<void> {
@@ -1251,25 +1408,32 @@ async function safeEditMessage(
   }
 }
 
-async function downloadTelegramFile(api: Context["api"], token: string, fileId: string): Promise<string> {
+async function downloadTelegramFile(
+  api: Context["api"],
+  token: string,
+  fileId: string,
+  maxBytes = MAX_AUDIO_FILE_SIZE,
+): Promise<string> {
   const file = await api.getFile(fileId);
   if (!file.file_path) {
     throw new Error("Telegram did not return a file path");
   }
 
-  if (file.file_size && file.file_size > MAX_AUDIO_FILE_SIZE) {
-    throw new Error(`Audio file too large (${Math.round(file.file_size / 1024 / 1024)} MB, max 25 MB)`);
+  if (file.file_size && file.file_size > maxBytes) {
+    throw new Error(
+      `Telegram file too large (${Math.round(file.file_size / 1024 / 1024)} MB, max ${Math.round(maxBytes / 1024 / 1024)} MB)`,
+    );
   }
 
   const url = `https://api.telegram.org/file/bot${token}/${file.file_path}`;
   const response = await fetch(url);
   if (!response.ok) {
-    throw new Error(`Failed to download voice file: ${response.status}`);
+    throw new Error(`Failed to download Telegram file: ${response.status}`);
   }
 
   const buffer = Buffer.from(await response.arrayBuffer());
-  const extension = path.extname(file.file_path) || ".ogg";
-  const tempPath = path.join(tmpdir(), `telecodex-voice-${randomUUID()}${extension}`);
+  const extension = path.extname(file.file_path) || ".bin";
+  const tempPath = path.join(tmpdir(), `telecodex-file-${randomUUID()}${extension}`);
   await writeFile(tempPath, buffer);
   return tempPath;
 }

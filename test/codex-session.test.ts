@@ -113,6 +113,8 @@ describe("CodexSessionService", () => {
     onToolUpdate: vi.fn(),
     onToolEnd: vi.fn(),
     onAgentEnd: vi.fn(),
+    onTodoUpdate: vi.fn(),
+    onTurnComplete: vi.fn(),
   });
 
   const streamEvents = (events: any[]) =>
@@ -223,6 +225,100 @@ describe("CodexSessionService", () => {
     expect(callbacks.onToolUpdate).toHaveBeenCalledWith("cmd-1", "file-a\nfile-b");
     expect(callbacks.onToolEnd).toHaveBeenCalledWith("cmd-1", false);
     expect(callbacks.onToolUpdate).toHaveBeenCalledTimes(1);
+  });
+
+  it("maps web_search events to tool callbacks", async () => {
+    const service = await CodexSessionService.create(createConfig());
+    const thread = mockState.createdThreads[0];
+    const callbacks = createCallbacks();
+
+    thread.runStreamed.mockResolvedValueOnce({
+      events: streamEvents([
+        {
+          type: "item.started",
+          item: {
+            id: "search-1",
+            type: "web_search",
+            query: "latest TypeScript release notes",
+          },
+        },
+        {
+          type: "item.completed",
+          item: {
+            id: "search-1",
+            type: "web_search",
+            query: "latest TypeScript release notes",
+          },
+        },
+      ]),
+    });
+
+    await service.prompt("search", callbacks);
+
+    expect(callbacks.onToolStart).toHaveBeenCalledWith("🔍 latest TypeScript release notes", "search-1");
+    expect(callbacks.onToolUpdate).toHaveBeenCalledWith("search-1", "latest TypeScript release notes");
+    expect(callbacks.onToolEnd).toHaveBeenCalledWith("search-1", false);
+  });
+
+  it("surfaces error items as failed tool events", async () => {
+    const service = await CodexSessionService.create(createConfig());
+    const thread = mockState.createdThreads[0];
+    const callbacks = createCallbacks();
+
+    thread.runStreamed.mockResolvedValueOnce({
+      events: streamEvents([
+        {
+          type: "item.completed",
+          item: {
+            id: "error-1",
+            type: "error",
+            message: "tool failed but the stream continued",
+          },
+        },
+      ]),
+    });
+
+    await service.prompt("continue", callbacks);
+
+    expect(callbacks.onToolStart).toHaveBeenCalledWith("⚠️ error", "error-1");
+    expect(callbacks.onToolUpdate).toHaveBeenCalledWith("error-1", "tool failed but the stream continued");
+    expect(callbacks.onToolEnd).toHaveBeenCalledWith("error-1", true);
+  });
+
+  it("emits todo list updates for started, updated, and completed items", async () => {
+    const service = await CodexSessionService.create(createConfig());
+    const thread = mockState.createdThreads[0];
+    const callbacks = createCallbacks();
+    const startedItems = [{ text: "Inspect repo", completed: false }];
+    const updatedItems = [
+      { text: "Inspect repo", completed: true },
+      { text: "Write tests", completed: false },
+    ];
+    const completedItems = [
+      { text: "Inspect repo", completed: true },
+      { text: "Write tests", completed: true },
+    ];
+
+    thread.runStreamed.mockResolvedValueOnce({
+      events: streamEvents([
+        {
+          type: "item.started",
+          item: { id: "todo-1", type: "todo_list", items: startedItems },
+        },
+        {
+          type: "item.updated",
+          item: { id: "todo-1", type: "todo_list", items: updatedItems },
+        },
+        {
+          type: "item.completed",
+          item: { id: "todo-1", type: "todo_list", items: completedItems },
+        },
+      ]),
+    });
+
+    await service.prompt("plan", callbacks);
+
+    expect(callbacks.onTodoUpdate.mock.calls).toEqual([[startedItems], [updatedItems], [completedItems]]);
   });
 
   it("passes only the new output delta across multiple item.updated events (no duplication)", async () => {
@@ -366,6 +462,48 @@ describe("CodexSessionService", () => {
     await service.prompt("done?", callbacks);
 
     expect(callbacks.onAgentEnd).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports per-turn token usage and accumulates session totals", async () => {
+    const service = await CodexSessionService.create(createConfig());
+    const thread = mockState.createdThreads[0];
+    const firstCallbacks = createCallbacks();
+    const secondCallbacks = createCallbacks();
+    const firstUsage = {
+      input_tokens: 11,
+      cached_input_tokens: 3,
+      output_tokens: 7,
+    };
+    const secondUsage = {
+      input_tokens: 5,
+      cached_input_tokens: 2,
+      output_tokens: 13,
+    };
+
+    thread.runStreamed
+      .mockResolvedValueOnce({ events: streamEvents([{ type: "turn.completed", usage: firstUsage }]) })
+      .mockResolvedValueOnce({ events: streamEvents([{ type: "turn.completed", usage: secondUsage }]) });
+
+    await service.prompt("first", firstCallbacks);
+    await service.prompt("second", secondCallbacks);
+
+    expect(firstCallbacks.onAgentEnd).toHaveBeenCalledTimes(1);
+    expect(firstCallbacks.onTurnComplete).toHaveBeenCalledWith({
+      inputTokens: 11,
+      cachedInputTokens: 3,
+      outputTokens: 7,
+    });
+    expect(secondCallbacks.onAgentEnd).toHaveBeenCalledTimes(1);
+    expect(secondCallbacks.onTurnComplete).toHaveBeenCalledWith({
+      inputTokens: 5,
+      cachedInputTokens: 2,
+      outputTokens: 13,
+    });
+    expect(service.getInfo().sessionTokens).toEqual({
+      input: 16,
+      cached: 5,
+      output: 20,
+    });
   });
 
   it("throws when the turn fails", async () => {
@@ -537,11 +675,69 @@ describe("CodexSessionService", () => {
     expect(service.getInfo().model).toBe("gpt-5.4");
   });
 
+  it("setReasoningEffort stores the effort and applies it to new threads", async () => {
+    const service = await CodexSessionService.create(createConfig());
+    const codexInstance = mockState.codexInstances[0];
+
+    service.setReasoningEffort("high");
+    expect(service.getInfo().reasoningEffort).toBe("high");
+
+    await service.newThread();
+
+    expect(codexInstance.startThread).toHaveBeenLastCalledWith({
+      model: "o3",
+      sandboxMode: "workspace-write",
+      workingDirectory: "/workspace/base",
+      approvalPolicy: "never",
+      skipGitRepoCheck: true,
+      modelReasoningEffort: "high",
+    });
+  });
+
   it("setModel updates the tracked model returned by getInfo", async () => {
     const service = await CodexSessionService.create(createConfig());
 
     expect(service.setModel("o4-mini")).toBe("o4-mini");
     expect(service.getInfo().model).toBe("o4-mini");
+  });
+
+  it("passes text plus image inputs through to the SDK", async () => {
+    const service = await CodexSessionService.create(createConfig());
+    const thread = mockState.createdThreads[0];
+    const callbacks = createCallbacks();
+
+    await service.prompt({ text: "describe this", imagePaths: ["/tmp/img.png"] }, callbacks);
+
+    expect(thread.runStreamed).toHaveBeenCalledWith(
+      [
+        { type: "text", text: "describe this" },
+        { type: "local_image", path: "/tmp/img.png" },
+      ],
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+  });
+
+  it("passes image-only inputs through to the SDK", async () => {
+    const service = await CodexSessionService.create(createConfig());
+    const thread = mockState.createdThreads[0];
+    const callbacks = createCallbacks();
+
+    await service.prompt({ imagePaths: ["/tmp/img.png"] }, callbacks);
+
+    expect(thread.runStreamed).toHaveBeenCalledWith(
+      [{ type: "local_image", path: "/tmp/img.png" }],
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+  });
+
+  it("keeps string inputs unchanged when calling the SDK", async () => {
+    const service = await CodexSessionService.create(createConfig());
+    const thread = mockState.createdThreads[0];
+    const callbacks = createCallbacks();
+
+    await service.prompt("hello", callbacks);
+
+    expect(thread.runStreamed).toHaveBeenCalledWith("hello", expect.objectContaining({ signal: expect.any(AbortSignal) }));
   });
 
   it("handback clears the active thread and returns thread id plus workspace", async () => {
@@ -564,6 +760,11 @@ describe("CodexSessionService", () => {
       threadId: null,
       workspace: "/workspace/base",
       model: "o3",
+      sessionTokens: {
+        input: 1,
+        cached: 0,
+        output: 1,
+      },
     });
   });
 

@@ -1,9 +1,12 @@
 import {
   Codex,
   type ApprovalMode,
+  type Input,
+  type ModelReasoningEffort,
   type SandboxMode,
   type Thread,
   type ThreadEvent,
+  type UserInput,
 } from "@openai/codex-sdk";
 
 import type { TeleCodexConfig } from "./config.js";
@@ -22,12 +25,24 @@ export interface CodexSessionCallbacks {
   onToolUpdate: (toolCallId: string, partialResult: string) => void;
   onToolEnd: (toolCallId: string, isError: boolean) => void;
   onAgentEnd: () => void;
+  onTodoUpdate?: (items: Array<{ text: string; completed: boolean }>) => void;
+  onTurnComplete?: (usage: {
+    inputTokens: number;
+    cachedInputTokens: number;
+    outputTokens: number;
+  }) => void;
 }
 
 export interface CodexSessionInfo {
   threadId: string | null;
   workspace: string;
   model?: string;
+  reasoningEffort?: string;
+  sessionTokens?: {
+    input: number;
+    cached: number;
+    output: number;
+  };
 }
 
 export class CodexSessionService {
@@ -37,6 +52,8 @@ export class CodexSessionService {
   private abortController: AbortController | null = null;
   private currentThreadId: string | null = null;
   private currentModel: string | undefined;
+  private currentReasoningEffort: ModelReasoningEffort | undefined;
+  private sessionTokens = { input: 0, cached: 0, output: 0 };
 
   private constructor(private readonly config: TeleCodexConfig) {
     this.currentWorkspace = config.workspace;
@@ -56,11 +73,21 @@ export class CodexSessionService {
   }
 
   getInfo(): CodexSessionInfo {
-    return {
+    const info: CodexSessionInfo = {
       threadId: this.thread?.id ?? this.currentThreadId,
       workspace: this.currentWorkspace,
       model: this.currentModel ?? this.config.codexModel,
     };
+
+    if (this.currentReasoningEffort) {
+      info.reasoningEffort = this.currentReasoningEffort;
+    }
+
+    if (this.sessionTokens.input > 0 || this.sessionTokens.cached > 0 || this.sessionTokens.output > 0) {
+      info.sessionTokens = { ...this.sessionTokens };
+    }
+
+    return info;
   }
 
   isProcessing(): boolean {
@@ -75,7 +102,10 @@ export class CodexSessionService {
     return this.currentWorkspace;
   }
 
-  async prompt(text: string, callbacks: CodexSessionCallbacks): Promise<void> {
+  async prompt(
+    input: string | { text?: string; imagePaths?: string[] },
+    callbacks: CodexSessionCallbacks,
+  ): Promise<void> {
     if (!this.thread) {
       throw new Error("Codex thread is not initialized");
     }
@@ -92,7 +122,7 @@ export class CodexSessionService {
     const lastCommandOutput = new Map<string, string>();
 
     try {
-      const { events } = await this.thread.runStreamed(text, { signal: controller.signal });
+      const { events } = await this.thread.runStreamed(this.buildSdkInput(input), { signal: controller.signal });
 
       for await (const event of events) {
         this.handleThreadEvent(event);
@@ -123,6 +153,14 @@ export class CodexSessionService {
                   callbacks.onToolUpdate(item.id, delta);
                 }
               }
+            } else if (item.type === "web_search") {
+              if (event.type === "item.started") {
+                const label = truncate(item.query, 60);
+                callbacks.onToolStart(`🔍 ${label}`, item.id);
+                callbacks.onToolUpdate(item.id, item.query);
+              }
+            } else if (item.type === "todo_list") {
+              callbacks.onTodoUpdate?.(item.items);
             }
             break;
           }
@@ -155,12 +193,33 @@ export class CodexSessionService {
                 callbacks.onToolUpdate(item.id, item.error.message);
               }
               callbacks.onToolEnd(item.id, item.status === "failed");
+            } else if (item.type === "web_search") {
+              callbacks.onToolEnd(item.id, false);
+            } else if (item.type === "error") {
+              callbacks.onToolStart("⚠️ error", item.id);
+              callbacks.onToolUpdate(item.id, item.message);
+              callbacks.onToolEnd(item.id, true);
+            } else if (item.type === "todo_list") {
+              callbacks.onTodoUpdate?.(item.items);
             }
             break;
           }
-          case "turn.completed":
+          case "turn.completed": {
+            // Accumulate and deliver usage BEFORE onAgentEnd so that
+            // finalizeResponse() can read lastTurnUsage when building the
+            // final message text.
+            const u = event.usage;
+            this.sessionTokens.input += u.input_tokens;
+            this.sessionTokens.cached += u.cached_input_tokens;
+            this.sessionTokens.output += u.output_tokens;
+            callbacks.onTurnComplete?.({
+              inputTokens: u.input_tokens,
+              cachedInputTokens: u.cached_input_tokens,
+              outputTokens: u.output_tokens,
+            });
             callbacks.onAgentEnd();
             break;
+          }
           case "turn.failed":
             throw new Error(event.error.message);
           case "error":
@@ -235,6 +294,10 @@ export class CodexSessionService {
     return slug;
   }
 
+  setReasoningEffort(effort: ModelReasoningEffort): void {
+    this.currentReasoningEffort = effort;
+  }
+
   handback(): { threadId: string | null; workspace: string } {
     const info = { threadId: this.currentThreadId, workspace: this.currentWorkspace };
     this.abortController?.abort();
@@ -251,22 +314,54 @@ export class CodexSessionService {
     this.currentThreadId = null;
   }
 
+  private buildSdkInput(input: string | { text?: string; imagePaths?: string[] }): Input {
+    if (typeof input === "string") {
+      return input;
+    }
+
+    const parts: UserInput[] = [];
+    if (input.text) {
+      parts.push({ type: "text", text: input.text });
+    }
+    for (const imagePath of input.imagePaths ?? []) {
+      parts.push({ type: "local_image", path: imagePath });
+    }
+    // No parts at all — fall back to empty string rather than passing [] to the SDK
+    if (parts.length === 0) {
+      return "";
+    }
+    // Single plain-text part — pass as a bare string (SDK accepts both forms)
+    if (parts.length === 1 && parts[0]?.type === "text") {
+      return parts[0].text;
+    }
+    return parts;
+  }
+
   private buildThreadOptions(workspace: string, model?: string): {
     model?: string;
     sandboxMode: SandboxMode;
     workingDirectory: string;
     approvalPolicy: ApprovalMode;
     skipGitRepoCheck: true;
+    modelReasoningEffort?: ModelReasoningEffort;
   } {
     const effectiveModel = model ?? this.currentModel ?? this.config.codexModel;
-
-    return {
+    const options = {
       model: effectiveModel,
       sandboxMode: this.config.codexSandboxMode,
       workingDirectory: workspace,
       approvalPolicy: this.config.codexApprovalPolicy,
-      skipGitRepoCheck: true,
+      skipGitRepoCheck: true as const,
     };
+
+    if (this.currentReasoningEffort) {
+      return {
+        ...options,
+        modelReasoningEffort: this.currentReasoningEffort,
+      };
+    }
+
+    return options;
   }
 
   private ensureIdle(action: string): void {
@@ -300,4 +395,8 @@ function buildCodexEnv(apiKey?: string): Record<string, string> {
 
 function computeTextDelta(previousText: string, nextText: string): string {
   return nextText.startsWith(previousText) ? nextText.slice(previousText.length) : nextText;
+}
+
+function truncate(text: string, maxLength: number): string {
+  return text.length <= maxLength ? text : `${text.slice(0, maxLength - 1)}…`;
 }
