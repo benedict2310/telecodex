@@ -693,7 +693,7 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
     }
   });
 
-  bot.command("sessions", async (ctx) => {
+  bot.command(["sessions", "switch"], async (ctx) => {
     const chatId = ctx.chat?.id;
     if (!chatId) {
       return;
@@ -706,6 +706,26 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
       return;
     }
 
+    const rawText = ctx.message?.text ?? "";
+    const threadId = rawText.replace(/^\/(?:sessions|switch)(?:@\w+)?\s*/, "").trim();
+
+    if (threadId) {
+      isSwitching = true;
+      try {
+        const info = await codexSession.switchSession(threadId);
+        const html = `<b>Switched thread.</b>\n\n${renderSessionInfoHTML(info)}`;
+        const plain = `Switched thread.\n\n${renderSessionInfoPlain(info)}`;
+        await safeReply(ctx, html, { fallbackText: plain });
+      } catch (error) {
+        await safeReply(ctx, `<b>Failed:</b> ${escapeHTML(formatError(error))}`, {
+          fallbackText: `Failed: ${formatError(error)}`,
+        });
+      } finally {
+        isSwitching = false;
+      }
+      return;
+    }
+
     const sessions = codexSession.listAllSessions(10);
     if (sessions.length === 0) {
       await safeReply(ctx, escapeHTML("No recent threads found."), {
@@ -714,43 +734,71 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
       return;
     }
 
+    const groupedSessions = new Map<string, typeof sessions>();
+    for (const session of sessions) {
+      const workspaceSessions = groupedSessions.get(session.cwd);
+      if (workspaceSessions) {
+        workspaceSessions.push(session);
+      } else {
+        groupedSessions.set(session.cwd, [session]);
+      }
+    }
+
+    const orderedSessions: typeof sessions = [];
+    const plainGroups: string[] = [];
+    const htmlGroups: string[] = [];
+
+    for (const [workspace, workspaceSessions] of groupedSessions.entries()) {
+      const workspaceName = getWorkspaceShortName(workspace);
+      const plainGroupLines = [`📁 ${workspaceName}`];
+      const htmlGroupLines = [`📁 <b>${escapeHTML(workspaceName)}</b>`];
+
+      for (const session of workspaceSessions) {
+        orderedSessions.push(session);
+        const index = orderedSessions.length;
+        const title = formatThreadTitle(session.title || session.firstUserMessage || "(untitled)");
+        const relative = formatRelativeTime(session.updatedAt);
+        const model = session.model ?? "default";
+
+        plainGroupLines.push(`  ${index}. ${title}`);
+        plainGroupLines.push(`  🤖 ${model} • ${relative}`);
+        plainGroupLines.push("");
+
+        htmlGroupLines.push(`  <b>${index}.</b> <code>${escapeHTML(title)}</code>`);
+        htmlGroupLines.push(`  🤖 <code>${escapeHTML(model)}</code> • ${escapeHTML(relative)}`);
+        htmlGroupLines.push("");
+      }
+
+      plainGroups.push(plainGroupLines.join("\n").trimEnd());
+      htmlGroups.push(htmlGroupLines.join("\n").trimEnd());
+    }
+
     pendingSessionPicks.set(
       chatId,
-      sessions.map((session) => session.id),
+      orderedSessions.map((session) => session.id),
     );
 
     const activeThreadId = codexSession.getInfo().threadId;
-    const plainLines = [`Recent threads (showing 1–${sessions.length}):`, ""];
-    const htmlLines = [`<b>Recent threads</b> <i>(showing 1–${sessions.length})</i>:`, ""];
-
-    for (const [index, session] of sessions.entries()) {
-      const title = formatThreadTitle(session.title || session.firstUserMessage || "(untitled)");
-      const relative = formatRelativeTime(session.updatedAt);
-      const model = session.model ?? "default";
-
-      plainLines.push(`${index + 1}. ${title}`);
-      plainLines.push(`   📁 ${session.cwd}`);
-      plainLines.push(`   🤖 ${model} • ${relative}`);
-      plainLines.push("");
-
-      htmlLines.push(`<b>${index + 1}.</b> <code>${escapeHTML(title)}</code>`);
-      htmlLines.push(`   📁 <code>${escapeHTML(session.cwd)}</code>`);
-      htmlLines.push(`   🤖 <code>${escapeHTML(model)}</code> • ${escapeHTML(relative)}`);
-      htmlLines.push("");
-    }
-
     const keyboard = buildGridKeyboard(
-      sessions.map((session, index) => ({
+      orderedSessions.map((session, index) => ({
         label: session.id === activeThreadId ? `Switch to ${index + 1} ← active` : `Switch to ${index + 1}`,
         callbackData: `sess_${index}`,
       })),
       3,
     );
 
-    await safeReply(ctx, htmlLines.join("\n").trim(), {
-      fallbackText: plainLines.join("\n").trim(),
-      replyMarkup: keyboard,
-    });
+    await safeReply(
+      ctx,
+      [`<b>Available threads</b> <i>(${orderedSessions.length})</i>:`, "", htmlGroups.join("\n\n"), "", "Tap a button to switch."]
+        .join("\n")
+        .trim(),
+      {
+        fallbackText: [`Available threads (${orderedSessions.length}):`, "", plainGroups.join("\n\n"), "", "Tap a button to switch."]
+          .join("\n")
+          .trim(),
+        replyMarkup: keyboard,
+      },
+    );
   });
 
   bot.command("model", async (ctx) => {
@@ -1061,6 +1109,7 @@ export async function registerCommands(bot: Bot<Context>): Promise<void> {
     { command: "abort", description: "Cancel current operation" },
     { command: "session", description: "Current thread details" },
     { command: "sessions", description: "Browse and switch recent threads" },
+    { command: "switch", description: "Switch to a thread by ID" },
     { command: "model", description: "View and change model" },
     { command: "voice", description: "Check voice transcription status" },
   ]);
@@ -1230,7 +1279,7 @@ function buildGridKeyboard(items: KeyboardItem[], columns = 2): InlineKeyboard {
 
   items.forEach((item, index) => {
     keyboard.text(item.label, item.callbackData);
-    if ((index + 1) % columns === 0 || index === items.length - 1) {
+    if ((index + 1) % columns === 0 && index < items.length - 1) {
       keyboard.row();
     }
   });
