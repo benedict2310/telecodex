@@ -1,27 +1,26 @@
 import { createBot, registerCommands } from "./bot.js";
 import { loadConfig } from "./config.js";
-import { CodexSessionService } from "./codex-session.js";
+import { SessionRegistry } from "./session-registry.js";
 
-let codexSession: CodexSessionService | undefined;
+let registry: SessionRegistry | undefined;
 let bot: ReturnType<typeof createBot> | undefined;
 
 try {
   const config = loadConfig();
-  codexSession = await CodexSessionService.create(config);
-  bot = createBot(config, codexSession);
+  registry = new SessionRegistry(config);
+  bot = createBot(config, registry);
   await registerCommands(bot);
 
-  const sessionInfo = codexSession.getInfo();
   console.log("TeleCodex running");
-  console.log(`Thread ID: ${sessionInfo.threadId ?? "(not started yet)"}`);
-  console.log(`Workspace: ${sessionInfo.workspace}`);
-  if (sessionInfo.model) {
-    console.log(`Model: ${sessionInfo.model}`);
+  console.log(`Workspace: ${config.workspace}`);
+  if (config.codexModel) {
+    console.log(`Default model: ${config.codexModel}`);
   }
+  console.log("Session mode: per Telegram context");
 } catch (error) {
   const message = error instanceof Error ? error.message : String(error);
   console.error(`Failed to start TeleCodex: ${message}`);
-  codexSession?.dispose();
+  registry?.disposeAll();
   process.exit(1);
 }
 
@@ -36,7 +35,7 @@ const shutdown = (signal: NodeJS.Signals) => {
   if (bot) bot.stop();
 
   setTimeout(() => {
-    codexSession?.dispose();
+    registry?.disposeAll();
     console.log("TeleCodex stopped.");
     process.exit(0);
   }, 500);
@@ -74,7 +73,7 @@ async function startPolling(): Promise<void> {
     }
 
     console.error(`Fatal polling error: ${message}`);
-    codexSession?.dispose();
+    registry?.disposeAll();
     process.exit(1);
   }
 }

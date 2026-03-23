@@ -45,6 +45,13 @@ export interface CodexSessionInfo {
   };
 }
 
+export interface CreateOptions {
+  workspace?: string;
+  model?: string;
+  reasoningEffort?: string;
+  resumeThreadId?: string;
+}
+
 export class CodexSessionService {
   private readonly codex: Codex;
   private thread: Thread | null = null;
@@ -66,9 +73,18 @@ export class CodexSessionService {
     });
   }
 
-  static async create(config: TeleCodexConfig): Promise<CodexSessionService> {
+  static async create(config: TeleCodexConfig, options?: CreateOptions): Promise<CodexSessionService> {
     const service = new CodexSessionService(config);
-    await service.newThread(config.workspace);
+    service.currentWorkspace = options?.workspace ?? config.workspace;
+    service.currentModel = options?.model ?? config.codexModel;
+    service.currentReasoningEffort = options?.reasoningEffort as ModelReasoningEffort | undefined;
+
+    if (options?.resumeThreadId) {
+      await service.resumeThread(options.resumeThreadId);
+      return service;
+    }
+
+    await service.newThread(service.currentWorkspace, service.currentModel);
     return service;
   }
 
@@ -256,7 +272,7 @@ export class CodexSessionService {
   async resumeThread(threadId: string): Promise<CodexSessionInfo> {
     this.ensureIdle("resume a thread");
 
-    this.thread = this.codex.resumeThread(threadId, this.buildThreadOptions(this.currentWorkspace));
+    this.thread = this.codex.resumeThread(threadId, this.buildThreadOptions(this.currentWorkspace, this.currentModel));
     this.currentThreadId = threadId;
     return this.getInfo();
   }

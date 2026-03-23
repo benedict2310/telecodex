@@ -156,6 +156,32 @@ describe("CodexSessionService", () => {
     });
   });
 
+  it("create accepts overrides for workspace, model, reasoning effort, and resumeThreadId", async () => {
+    const service = await CodexSessionService.create(createConfig(), {
+      workspace: "/workspace/resumed",
+      model: "gpt-5.4",
+      reasoningEffort: "high",
+      resumeThreadId: "thread-resume",
+    });
+
+    const codexInstance = mockState.codexInstances[0];
+    expect(codexInstance.startThread).toHaveBeenCalledTimes(0);
+    expect(codexInstance.resumeThread).toHaveBeenCalledWith("thread-resume", {
+      model: "gpt-5.4",
+      sandboxMode: "workspace-write",
+      workingDirectory: "/workspace/resumed",
+      approvalPolicy: "never",
+      skipGitRepoCheck: true,
+      modelReasoningEffort: "high",
+    });
+    expect(service.getInfo()).toEqual({
+      threadId: "thread-resume",
+      workspace: "/workspace/resumed",
+      model: "gpt-5.4",
+      reasoningEffort: "high",
+    });
+  });
+
   it("translates agent_message events into text deltas", async () => {
     const service = await CodexSessionService.create(createConfig());
     const thread = mockState.createdThreads[0];

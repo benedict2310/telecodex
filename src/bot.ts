@@ -9,7 +9,9 @@ import type { ModelReasoningEffort } from "@openai/codex-sdk";
 
 import { type CodexSessionCallbacks, type CodexSessionInfo, type CodexSessionService } from "./codex-session.js";
 import type { TeleCodexConfig, ToolVerbosity } from "./config.js";
+import { contextKeyFromCtx, type TelegramContextKey } from "./context-key.js";
 import { escapeHTML, formatTelegramHTML } from "./format.js";
+import { SessionRegistry } from "./session-registry.js";
 import { getAvailableBackends, transcribeAudio } from "./voice.js";
 
 const TELEGRAM_MESSAGE_LIMIT = 4000;
@@ -76,37 +78,76 @@ function paginateKeyboard(items: KeyboardItem[], page: number, prefix: string): 
   return keyboard;
 }
 
-export function createBot(config: TeleCodexConfig, codexSession: CodexSessionService): Bot<Context> {
+export function createBot(config: TeleCodexConfig, registry: SessionRegistry): Bot<Context> {
   const bot = new Bot<Context>(config.telegramBotToken);
   bot.api.config.use(autoRetry({ maxRetryAttempts: 3, maxDelaySeconds: 10 }));
 
-  let isProcessing = false;
-  let isSwitching = false;
-  let isTranscribing = false;
-  const pendingSessionPicks = new Map<TelegramChatId, string[]>();
-  const pendingWorkspacePicks = new Map<TelegramChatId, string[]>();
-  const pendingSessionButtons = new Map<TelegramChatId, KeyboardItem[]>();
-  const pendingWorkspaceButtons = new Map<TelegramChatId, KeyboardItem[]>();
-  const pendingModelButtons = new Map<TelegramChatId, KeyboardItem[]>();
-  const pendingEffortButtons = new Map<TelegramChatId, KeyboardItem[]>();
+  const contextBusy = new Map<
+    TelegramContextKey,
+    { processing: boolean; switching: boolean; transcribing: boolean }
+  >();
+  const pendingSessionPicks = new Map<TelegramContextKey, string[]>();
+  const pendingWorkspacePicks = new Map<TelegramContextKey, string[]>();
+  const pendingSessionButtons = new Map<TelegramContextKey, KeyboardItem[]>();
+  const pendingWorkspaceButtons = new Map<TelegramContextKey, KeyboardItem[]>();
+  const pendingModelButtons = new Map<TelegramContextKey, KeyboardItem[]>();
+  const pendingEffortButtons = new Map<TelegramContextKey, KeyboardItem[]>();
 
-  const isBusy = (): boolean => isProcessing || isSwitching || isTranscribing || codexSession.isProcessing();
+  registry.onRemove((key) => contextBusy.delete(key));
+
+  const getBusyState = (
+    contextKey: TelegramContextKey,
+  ): { processing: boolean; switching: boolean; transcribing: boolean } => {
+    let state = contextBusy.get(contextKey);
+    if (!state) {
+      state = { processing: false, switching: false, transcribing: false };
+      contextBusy.set(contextKey, state);
+    }
+    return state;
+  };
+
+  const isBusy = (contextKey: TelegramContextKey): boolean => {
+    const state = contextBusy.get(contextKey);
+    const session = registry.get(contextKey);
+    return Boolean(state?.processing || state?.switching || state?.transcribing || session?.isProcessing());
+  };
+
+  const getContextSession = async (
+    ctx: Context,
+  ): Promise<{ contextKey: TelegramContextKey; session: CodexSessionService } | null> => {
+    const contextKey = contextKeyFromCtx(ctx);
+    if (!contextKey) {
+      return null;
+    }
+
+    const session = await registry.getOrCreate(contextKey);
+    return { contextKey, session };
+  };
+
+  const updateSessionMetadata = (contextKey: TelegramContextKey, session: CodexSessionService): void => {
+    registry.updateMetadata(contextKey, session);
+  };
 
   const handlePageCallback = (
     pattern: RegExp,
     prefix: string,
-    buttonsMap: Map<TelegramChatId, KeyboardItem[]>,
+    buttonsMap: Map<TelegramContextKey, KeyboardItem[]>,
     expiredMessage: string,
   ): void => {
     bot.callbackQuery(pattern, async (ctx) => {
-      const chatId = ctx.chat?.id;
+      const ctxKey = contextKeyFromCtx(ctx);
       const messageId = ctx.callbackQuery.message?.message_id;
       const page = Number.parseInt(ctx.match?.[1] ?? "", 10);
-      if (!chatId || !messageId || Number.isNaN(page)) {
+      if (!ctxKey || !messageId || Number.isNaN(page)) {
         await ctx.answerCallbackQuery();
         return;
       }
-      const buttons = buttonsMap.get(chatId);
+      const chatId = ctx.chat?.id;
+      if (!chatId) {
+        await ctx.answerCallbackQuery();
+        return;
+      }
+      const buttons = buttonsMap.get(ctxKey);
       if (!buttons) {
         await ctx.answerCallbackQuery({ text: expiredMessage });
         return;
@@ -129,13 +170,18 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
     });
   };
 
-  const ensureActiveThread = async (ctx: Context): Promise<boolean> => {
-    if (codexSession.hasActiveThread()) {
+  const ensureActiveThread = async (
+    ctx: Context,
+    contextKey: TelegramContextKey,
+    session: CodexSessionService,
+  ): Promise<boolean> => {
+    if (session.hasActiveThread()) {
       return true;
     }
 
     try {
-      await codexSession.newThread();
+      await session.newThread();
+      updateSessionMetadata(contextKey, session);
       return true;
     } catch (error) {
       await safeReply(ctx, escapeHTML(`Failed to create thread: ${formatError(error)}`), {
@@ -147,17 +193,20 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
 
   const handleUserPrompt = async (
     ctx: Context,
+    contextKey: TelegramContextKey,
     chatId: TelegramChatId,
+    session: CodexSessionService,
     userInput: string | { text?: string; imagePaths?: string[] },
   ): Promise<void> => {
-    if (isBusy()) {
+    if (isBusy(contextKey)) {
       await sendBusyReply(ctx);
       return;
     }
 
-    isProcessing = true;
+    const busyState = getBusyState(contextKey);
+    busyState.processing = true;
 
-    const abortKeyboard = new InlineKeyboard().text("⏹ Abort", "codex_abort");
+    const abortKeyboard = new InlineKeyboard().text("⏹ Abort", `codex_abort:${contextKey}`);
     const toolVerbosity: ToolVerbosity = config.toolVerbosity;
     const toolStates = new Map<string, ToolState>();
     const toolCounts = new Map<string, number>();
@@ -492,7 +541,7 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
 
         lastRenderedPlan = rendered;
         if (!planMessageId) {
-          if (planMessageSending) return; // drop concurrent sends; next update will reflect latest state
+          if (planMessageSending) return;
           planMessageSending = true;
           void sendTextMessage(bot.api, chatId, rendered, { parseMode: "HTML" })
             .then((msg) => {
@@ -521,11 +570,12 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
     };
 
     try {
-      if (!(await ensureActiveThread(ctx))) {
+      if (!(await ensureActiveThread(ctx, contextKey, session))) {
         return;
       }
 
-      await codexSession.prompt(userInput, callbacks);
+      await session.prompt(userInput, callbacks);
+      updateSessionMetadata(contextKey, session);
       await finalizeResponse();
     } catch (error) {
       stopTyping();
@@ -554,7 +604,7 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
     } finally {
       stopTyping();
       clearFlushTimer();
-      isProcessing = false;
+      busyState.processing = false;
     }
   };
 
@@ -573,7 +623,13 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
   });
 
   bot.command("start", async (ctx) => {
-    const info = codexSession.getInfo();
+    const contextSession = await getContextSession(ctx);
+    if (!contextSession) {
+      return;
+    }
+
+    const { session } = contextSession;
+    const info = session.getInfo();
     const voiceBackends = await getAvailableBackends().catch(() => []);
     const voiceStatus = formatVoiceStatus(voiceBackends);
     const plainText = [
@@ -601,6 +657,10 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
   });
 
   bot.command("voice", async (ctx) => {
+    if (!ctx.chat) {
+      return;
+    }
+
     const backends = await getAvailableBackends().catch(() => []);
 
     if (backends.length === 0) {
@@ -636,17 +696,24 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
       return;
     }
 
-    if (isBusy()) {
+    const contextSession = await getContextSession(ctx);
+    if (!contextSession) {
+      return;
+    }
+
+    const { contextKey, session } = contextSession;
+    if (isBusy(contextKey)) {
       await safeReply(ctx, escapeHTML("Cannot create a new thread while a prompt is running."), {
         fallbackText: "Cannot create a new thread while a prompt is running.",
       });
       return;
     }
 
-    const workspaces = codexSession.listWorkspaces();
+    const workspaces = session.listWorkspaces();
     if (workspaces.length <= 1) {
       try {
-        const info = await codexSession.newThread();
+        const info = await session.newThread();
+        updateSessionMetadata(contextKey, session);
         const plainText = `New thread created.\n\n${renderSessionInfoPlain(info)}`;
         const html = `<b>New thread created.</b>\n\n${renderSessionInfoHTML(info)}`;
         await safeReply(ctx, html, { fallbackText: plainText });
@@ -658,13 +725,13 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
       return;
     }
 
-    pendingWorkspacePicks.set(chatId, workspaces);
-    const currentWorkspace = codexSession.getCurrentWorkspace();
+    pendingWorkspacePicks.set(contextKey, workspaces);
+    const currentWorkspace = session.getCurrentWorkspace();
     const workspaceButtons = workspaces.map((workspace, index) => ({
       label: `${workspace === currentWorkspace ? "📂" : "📁"} ${getWorkspaceShortName(workspace)}`,
       callbackData: `ws_${index}`,
     }));
-    pendingWorkspaceButtons.set(chatId, workspaceButtons);
+    pendingWorkspaceButtons.set(contextKey, workspaceButtons);
     const keyboard = paginateKeyboard(workspaceButtons, 0, "ws");
 
     await safeReply(ctx, "<b>Select workspace for new thread:</b>", {
@@ -674,8 +741,14 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
   });
 
   bot.command("abort", async (ctx) => {
+    const contextSession = await getContextSession(ctx);
+    if (!contextSession) {
+      return;
+    }
+
+    const { session } = contextSession;
     try {
-      await codexSession.abort();
+      await session.abort();
       await safeReply(ctx, escapeHTML("Aborted current operation"), {
         fallbackText: "Aborted current operation",
       });
@@ -687,21 +760,33 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
   });
 
   bot.command("session", async (ctx) => {
-    const info = codexSession.getInfo();
+    const contextSession = await getContextSession(ctx);
+    if (!contextSession) {
+      return;
+    }
+
+    const { session } = contextSession;
+    const info = session.getInfo();
     await safeReply(ctx, renderSessionInfoHTML(info), {
       fallbackText: renderSessionInfoPlain(info),
     });
   });
 
   bot.command("handback", async (ctx) => {
-    if (isBusy()) {
+    const contextSession = await getContextSession(ctx);
+    if (!contextSession) {
+      return;
+    }
+
+    const { contextKey, session } = contextSession;
+    if (isBusy(contextKey)) {
       await safeReply(ctx, escapeHTML("Cannot hand back while a prompt is running. Use /abort first."), {
         fallbackText: "Cannot hand back while a prompt is running. Use /abort first.",
       });
       return;
     }
 
-    if (!codexSession.hasActiveThread()) {
+    if (!session.hasActiveThread()) {
       await safeReply(ctx, escapeHTML("No active thread to hand back."), {
         fallbackText: "No active thread to hand back.",
       });
@@ -709,7 +794,8 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
     }
 
     try {
-      const info = codexSession.handback();
+      const info = session.handback();
+      updateSessionMetadata(contextKey, session);
 
       if (!info.threadId) {
         await safeReply(
@@ -783,7 +869,13 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
       return;
     }
 
-    if (isBusy()) {
+    const contextSession = await getContextSession(ctx);
+    if (!contextSession) {
+      return;
+    }
+
+    const { contextKey, session } = contextSession;
+    if (isBusy(contextKey)) {
       await safeReply(ctx, escapeHTML("Cannot switch sessions while a prompt is running."), {
         fallbackText: "Cannot switch sessions while a prompt is running.",
       });
@@ -794,9 +886,11 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
     const threadId = rawText.replace(/^\/(?:sessions|switch)(?:@\w+)?\s*/, "").trim();
 
     if (threadId) {
-      isSwitching = true;
+      const busyState = getBusyState(contextKey);
+      busyState.switching = true;
       try {
-        const info = await codexSession.switchSession(threadId);
+        const info = await session.switchSession(threadId);
+        updateSessionMetadata(contextKey, session);
         const html = `<b>Switched thread.</b>\n\n${renderSessionInfoHTML(info)}`;
         const plain = `Switched thread.\n\n${renderSessionInfoPlain(info)}`;
         await safeReply(ctx, html, { fallbackText: plain });
@@ -805,12 +899,12 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
           fallbackText: `Failed: ${formatError(error)}`,
         });
       } finally {
-        isSwitching = false;
+        busyState.switching = false;
       }
       return;
     }
 
-    const sessions = codexSession.listAllSessions(50);
+    const sessions = session.listAllSessions(50);
     if (sessions.length === 0) {
       await safeReply(ctx, escapeHTML("No recent threads found."), {
         fallbackText: "No recent threads found.",
@@ -819,12 +913,12 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
     }
 
     const groupedSessions = new Map<string, typeof sessions>();
-    for (const session of sessions) {
-      const workspaceSessions = groupedSessions.get(session.cwd);
+    for (const listedSession of sessions) {
+      const workspaceSessions = groupedSessions.get(listedSession.cwd);
       if (workspaceSessions) {
-        workspaceSessions.push(session);
+        workspaceSessions.push(listedSession);
       } else {
-        groupedSessions.set(session.cwd, [session]);
+        groupedSessions.set(listedSession.cwd, [listedSession]);
       }
     }
 
@@ -835,23 +929,23 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
     }
 
     pendingSessionPicks.set(
-      chatId,
-      orderedSessions.map((session) => session.id),
+      contextKey,
+      orderedSessions.map((listedSession) => listedSession.id),
     );
 
-    const activeThreadId = codexSession.getInfo().threadId;
-    const sessionButtons = orderedSessions.map((session, index) => {
-      const workspaceName = trimLine(getWorkspaceShortName(session.cwd), 6) || "(unknown)";
-      const title = trimLine(session.title || session.firstUserMessage || "(untitled)", 20) || "(untitled)";
-      const relative = formatRelativeTime(session.updatedAt);
-      const prefix = session.id === activeThreadId ? "✅" : "📁";
+    const activeThreadId = session.getInfo().threadId;
+    const sessionButtons = orderedSessions.map((listedSession, index) => {
+      const workspaceName = trimLine(getWorkspaceShortName(listedSession.cwd), 6) || "(unknown)";
+      const title = trimLine(listedSession.title || listedSession.firstUserMessage || "(untitled)", 20) || "(untitled)";
+      const relative = formatRelativeTime(listedSession.updatedAt);
+      const prefix = listedSession.id === activeThreadId ? "✅" : "📁";
 
       return {
         label: `${prefix} ${workspaceName} · ${title} · ${relative}`,
         callbackData: `sess_${index}`,
       };
     });
-    pendingSessionButtons.set(chatId, sessionButtons);
+    pendingSessionButtons.set(contextKey, sessionButtons);
     const keyboard = paginateKeyboard(sessionButtons, 0, "sess");
 
     await safeReply(ctx, `<b>Recent threads</b> (${orderedSessions.length}):\nTap to switch.`, {
@@ -866,14 +960,20 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
       return;
     }
 
-    if (isBusy()) {
+    const contextSession = await getContextSession(ctx);
+    if (!contextSession) {
+      return;
+    }
+
+    const { contextKey, session } = contextSession;
+    if (isBusy(contextKey)) {
       await safeReply(ctx, escapeHTML("Cannot change model while a prompt is running."), {
         fallbackText: "Cannot change model while a prompt is running.",
       });
       return;
     }
 
-    const models = codexSession.listModels();
+    const models = session.listModels();
     if (models.length === 0) {
       await safeReply(ctx, escapeHTML("No models available."), {
         fallbackText: "No models available.",
@@ -881,19 +981,17 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
       return;
     }
 
-    const currentModel = codexSession.getInfo().model ?? "(default)";
+    const currentModel = session.getInfo().model ?? "(default)";
     const modelButtons = models.map((model) => ({
       label: `${model.displayName}${model.slug === currentModel ? " ✓" : ""}`,
       callbackData: `model_${model.slug}`,
     }));
-    pendingModelButtons.set(chatId, modelButtons);
+    pendingModelButtons.set(contextKey, modelButtons);
     const keyboard = paginateKeyboard(modelButtons, 0, "model");
 
     await safeReply(
       ctx,
-      [`<b>Current model:</b> <code>${escapeHTML(currentModel)}</code>`, "", "Select a model for new threads:"].join(
-        "\n",
-      ),
+      [`<b>Current model:</b> <code>${escapeHTML(currentModel)}</code>`, "", "Select a model for new threads:"].join("\n"),
       {
         fallbackText: [`Current model: ${currentModel}`, "", "Select a model for new threads:"].join("\n"),
         replyMarkup: keyboard,
@@ -907,17 +1005,23 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
       return;
     }
 
+    const contextSession = await getContextSession(ctx);
+    if (!contextSession) {
+      return;
+    }
+
+    const { contextKey, session } = contextSession;
     const efforts: ModelReasoningEffort[] = ["minimal", "low", "medium", "high", "xhigh"];
-    const current = codexSession.getInfo().reasoningEffort;
+    const current = session.getInfo().reasoningEffort;
     const effortButtons = efforts.map((effort) => ({
       label: effort === current ? `${effort} ✓` : effort,
       callbackData: `effort_${effort}`,
     }));
-    pendingEffortButtons.set(chatId, effortButtons);
+    pendingEffortButtons.set(contextKey, effortButtons);
     const keyboard = paginateKeyboard(effortButtons, 0, "effort");
     const text = current
       ? `<b>Reasoning effort:</b> <code>${escapeHTML(current)}</code>\n\nSelect for new threads:`
-      : `<b>Reasoning effort:</b> not set (model default)\n\nSelect for new threads:`;
+      : "<b>Reasoning effort:</b> not set (model default)\n\nSelect for new threads:";
     await safeReply(ctx, text, {
       fallbackText: text.replace(/<[^>]+>/g, ""),
       replyMarkup: keyboard,
@@ -932,9 +1036,21 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
   handlePageCallback(/^model_page_(\d+)$/, "model", pendingModelButtons, "Expired, run /model again");
   handlePageCallback(/^effort_page_(\d+)$/, "effort", pendingEffortButtons, "Expired, run /effort again");
 
-  bot.callbackQuery("codex_abort", async (ctx) => {
+  bot.callbackQuery(/^codex_abort:(.+)$/, async (ctx) => {
+    const contextKey = ctx.match?.[1];
+    if (!contextKey) {
+      await ctx.answerCallbackQuery();
+      return;
+    }
+
+    const session = registry.get(contextKey);
+    if (!session) {
+      await ctx.answerCallbackQuery({ text: "Nothing to abort" });
+      return;
+    }
+
     await ctx.answerCallbackQuery({ text: "Aborting..." });
-    await codexSession.abort();
+    await session.abort();
   });
 
   bot.callbackQuery(/^sess_(\d+)$/, async (ctx) => {
@@ -946,25 +1062,33 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
       return;
     }
 
-    const threadIds = pendingSessionPicks.get(chatId);
+    const contextSession = await getContextSession(ctx);
+    if (!contextSession) {
+      return;
+    }
+
+    const { contextKey, session } = contextSession;
+    const threadIds = pendingSessionPicks.get(contextKey);
     const threadId = threadIds?.[index];
     if (!threadId) {
       await ctx.answerCallbackQuery({ text: "Session expired, run /sessions again" });
       return;
     }
 
-    if (isBusy()) {
+    if (isBusy(contextKey)) {
       await ctx.answerCallbackQuery({ text: "Wait for the current prompt to finish" });
       return;
     }
 
     await ctx.answerCallbackQuery({ text: "Switching..." });
-    pendingSessionPicks.delete(chatId);
-    pendingSessionButtons.delete(chatId);
+    pendingSessionPicks.delete(contextKey);
+    pendingSessionButtons.delete(contextKey);
 
-    isSwitching = true;
+    const busyState = getBusyState(contextKey);
+    busyState.switching = true;
     try {
-      const info = await codexSession.switchSession(threadId);
+      const info = await session.switchSession(threadId);
+      updateSessionMetadata(contextKey, session);
       const plainText = `Switched session.\n\n${renderSessionInfoPlain(info)}`;
       const html = `<b>Switched session.</b>\n\n${renderSessionInfoHTML(info)}`;
 
@@ -982,7 +1106,7 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
         await safeReply(ctx, errHtml, { fallbackText: errPlain });
       }
     } finally {
-      isSwitching = false;
+      busyState.switching = false;
     }
   });
 
@@ -995,25 +1119,33 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
       return;
     }
 
-    const workspaces = pendingWorkspacePicks.get(chatId);
+    const contextSession = await getContextSession(ctx);
+    if (!contextSession) {
+      return;
+    }
+
+    const { contextKey, session } = contextSession;
+    const workspaces = pendingWorkspacePicks.get(contextKey);
     const workspace = workspaces?.[index];
     if (!workspace) {
       await ctx.answerCallbackQuery({ text: "Expired, run /new again" });
       return;
     }
 
-    if (isBusy()) {
+    if (isBusy(contextKey)) {
       await ctx.answerCallbackQuery({ text: "Wait for the current prompt to finish" });
       return;
     }
 
     await ctx.answerCallbackQuery({ text: "Creating thread..." });
-    pendingWorkspacePicks.delete(chatId);
-    pendingWorkspaceButtons.delete(chatId);
+    pendingWorkspacePicks.delete(contextKey);
+    pendingWorkspaceButtons.delete(contextKey);
 
-    isSwitching = true;
+    const busyState = getBusyState(contextKey);
+    busyState.switching = true;
     try {
-      const info = await codexSession.newThread(workspace);
+      const info = await session.newThread(workspace);
+      updateSessionMetadata(contextKey, session);
       const plainText = `New thread created.\n\n${renderSessionInfoPlain(info)}`;
       const html = `<b>New thread created.</b>\n\n${renderSessionInfoHTML(info)}`;
 
@@ -1031,7 +1163,7 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
         await safeReply(ctx, errHtml, { fallbackText: errPlain });
       }
     } finally {
-      isSwitching = false;
+      busyState.switching = false;
     }
   });
 
@@ -1044,7 +1176,13 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
       return;
     }
 
-    const buttons = pendingModelButtons.get(chatId);
+    const contextSession = await getContextSession(ctx);
+    if (!contextSession) {
+      return;
+    }
+
+    const { contextKey, session } = contextSession;
+    const buttons = pendingModelButtons.get(contextKey);
     if (!buttons) {
       await ctx.answerCallbackQuery({ text: "Expired, run /model again" });
       return;
@@ -1056,16 +1194,17 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
       return;
     }
 
-    if (isBusy()) {
+    if (isBusy(contextKey)) {
       await ctx.answerCallbackQuery({ text: "Wait for the current prompt to finish" });
       return;
     }
 
     await ctx.answerCallbackQuery({ text: "Setting model..." });
-    pendingModelButtons.delete(chatId);
+    pendingModelButtons.delete(contextKey);
 
     try {
-      const model = codexSession.setModel(slug);
+      const model = session.setModel(slug);
+      updateSessionMetadata(contextKey, session);
       const html = `<b>Model set to</b> <code>${escapeHTML(model)}</code> — applies to new threads.`;
       const plainText = `Model set to ${model} — applies to new threads.`;
 
@@ -1094,15 +1233,22 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
       return;
     }
 
-    const buttons = pendingEffortButtons.get(chatId);
+    const contextSession = await getContextSession(ctx);
+    if (!contextSession) {
+      return;
+    }
+
+    const { contextKey, session } = contextSession;
+    const buttons = pendingEffortButtons.get(contextKey);
     if (!buttons || !buttons.some((button) => button.callbackData === `effort_${effort}`)) {
       await ctx.answerCallbackQuery({ text: "Expired, run /effort again" });
       return;
     }
 
     await ctx.answerCallbackQuery({ text: `Effort set to ${effort}` });
-    pendingEffortButtons.delete(chatId);
-    codexSession.setReasoningEffort(effort);
+    pendingEffortButtons.delete(contextKey);
+    session.setReasoningEffort(effort);
+    updateSessionMetadata(contextKey, session);
     const html = `⚡ Reasoning effort set to <code>${escapeHTML(effort)}</code> — applies to new threads.`;
     await safeEditMessage(bot, chatId, messageId, html, {
       fallbackText: `⚡ Reasoning effort set to ${effort} — applies to new threads.`,
@@ -1110,17 +1256,29 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
   });
 
   bot.on("message:text", async (ctx) => {
+    const contextSession = await getContextSession(ctx);
+    if (!contextSession) {
+      return;
+    }
+
     const userText = ctx.message.text.trim();
     if (!userText || userText.startsWith("/")) {
       return;
     }
 
-    await handleUserPrompt(ctx, ctx.chat.id, userText);
+    const { contextKey, session } = contextSession;
+    await handleUserPrompt(ctx, contextKey, ctx.chat.id, session, userText);
   });
 
   bot.on(["message:voice", "message:audio"], async (ctx) => {
+    const contextSession = await getContextSession(ctx);
+    if (!contextSession) {
+      return;
+    }
+
+    const { contextKey, session } = contextSession;
     const chatId = ctx.chat.id;
-    if (isBusy()) {
+    if (isBusy(contextKey)) {
       await sendBusyReply(ctx);
       return;
     }
@@ -1130,7 +1288,8 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
       return;
     }
 
-    isTranscribing = true;
+    const busyState = getBusyState(contextKey);
+    busyState.transcribing = true;
     let tempFilePath: string | undefined;
     let transcript: string | undefined;
 
@@ -1160,7 +1319,7 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
       });
       return;
     } finally {
-      isTranscribing = false;
+      busyState.transcribing = false;
       if (tempFilePath) {
         await unlink(tempFilePath).catch(() => {});
       }
@@ -1170,12 +1329,18 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
       return;
     }
 
-    await handleUserPrompt(ctx, chatId, transcript);
+    await handleUserPrompt(ctx, contextKey, chatId, session, transcript);
   });
 
   bot.on("message:photo", async (ctx) => {
+    const contextSession = await getContextSession(ctx);
+    if (!contextSession) {
+      return;
+    }
+
+    const { contextKey, session } = contextSession;
     const chatId = ctx.chat.id;
-    if (isBusy()) {
+    if (isBusy(contextKey)) {
       await sendBusyReply(ctx);
       return;
     }
@@ -1186,7 +1351,8 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
       return;
     }
 
-    isTranscribing = true;
+    const busyState = getBusyState(contextKey);
+    busyState.transcribing = true;
     let tempFilePath: string | undefined;
 
     try {
@@ -1198,21 +1364,19 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
       });
       return;
     } finally {
-      isTranscribing = false;
+      busyState.transcribing = false;
       if (!tempFilePath) {
         // Download failed — nothing to clean up further
       }
     }
 
-    // tempFilePath is set; process it outside the download try/catch so Codex
-    // errors surface with their own messages rather than "Failed to download photo".
     const caption = ctx.message.caption?.trim();
     const promptInput: { text?: string; imagePaths: string[] } = { imagePaths: [tempFilePath] };
     if (caption) {
       promptInput.text = caption;
     }
     try {
-      await handleUserPrompt(ctx, chatId, promptInput);
+      await handleUserPrompt(ctx, contextKey, chatId, session, promptInput);
     } finally {
       await unlink(tempFilePath).catch(() => {});
     }
