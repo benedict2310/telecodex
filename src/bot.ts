@@ -1,13 +1,26 @@
 import { randomUUID } from "node:crypto";
-import { unlink, writeFile } from "node:fs/promises";
+import { readFile, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { autoRetry } from "@grammyjs/auto-retry";
-import { Bot, InlineKeyboard, type Context } from "grammy";
 import type { ModelReasoningEffort } from "@openai/codex-sdk";
+import { Bot, InlineKeyboard, InputFile, type Context } from "grammy";
 
-import { type CodexSessionCallbacks, type CodexSessionInfo, type CodexSessionService } from "./codex-session.js";
+import {
+  buildFileInstructions,
+  cleanupInbox,
+  outboxPath,
+  stageFile,
+  type StagedFile,
+} from "./attachments.js";
+import { collectArtifactReport, ensureOutDir, formatArtifactSummary } from "./artifacts.js";
+import {
+  type CodexPromptInput,
+  type CodexSessionCallbacks,
+  type CodexSessionInfo,
+  type CodexSessionService,
+} from "./codex-session.js";
 import type { TeleCodexConfig, ToolVerbosity } from "./config.js";
 import { contextKeyFromCtx, type TelegramContextKey } from "./context-key.js";
 import { escapeHTML, formatTelegramHTML } from "./format.js";
@@ -196,7 +209,7 @@ export function createBot(config: TeleCodexConfig, registry: SessionRegistry): B
     contextKey: TelegramContextKey,
     chatId: TelegramChatId,
     session: CodexSessionService,
-    userInput: string | { text?: string; imagePaths?: string[] },
+    userInput: CodexPromptInput,
   ): Promise<void> => {
     if (isBusy(contextKey)) {
       await sendBusyReply(ctx);
@@ -608,6 +621,31 @@ export function createBot(config: TeleCodexConfig, registry: SessionRegistry): B
     }
   };
 
+  const deliverArtifacts = async (ctx: Context, chatId: TelegramChatId, outDir: string): Promise<void> => {
+    const { artifacts, skippedCount } = await collectArtifactReport(outDir);
+
+    if (artifacts.length === 0 && skippedCount === 0) {
+      return;
+    }
+
+    await ctx.api.sendChatAction(chatId, "upload_document").catch(() => {});
+
+    let failedCount = 0;
+    for (const artifact of artifacts) {
+      try {
+        await ctx.api.sendDocument(chatId, new InputFile(artifact.localPath, artifact.name));
+      } catch (error) {
+        failedCount += 1;
+        console.error(`Failed to send artifact ${artifact.name}:`, error);
+      }
+    }
+
+    const summary = formatArtifactSummary(artifacts, skippedCount + failedCount);
+    if (summary) {
+      await safeReply(ctx, escapeHTML(summary), { fallbackText: summary });
+    }
+  };
+
   bot.use(async (ctx, next) => {
     const fromId = ctx.from?.id;
     if (!fromId || !config.telegramAllowedUserIdSet.has(fromId)) {
@@ -638,6 +676,7 @@ export function createBot(config: TeleCodexConfig, registry: SessionRegistry): B
       "Send any text message to continue the current Codex thread from Telegram.",
       "Send a voice message or audio file to transcribe it into a Codex prompt.",
       "Send a photo (with optional caption) to show Codex an image.",
+      "Send a document to stage it for Codex and receive generated files back.",
       `Voice: ${voiceStatus}`,
       "",
       renderSessionInfoPlain(info),
@@ -648,6 +687,7 @@ export function createBot(config: TeleCodexConfig, registry: SessionRegistry): B
       "Send any text message to continue the current Codex thread from Telegram.",
       "Send a voice message or audio file to transcribe it into a Codex prompt.",
       "Send a photo (with optional caption) to show Codex an image.",
+      "Send a document to stage it for Codex and receive generated files back.",
       `<b>Voice:</b> <code>${escapeHTML(voiceStatus)}</code>`,
       "",
       renderSessionInfoHTML(info),
@@ -1379,6 +1419,102 @@ export function createBot(config: TeleCodexConfig, registry: SessionRegistry): B
       await handleUserPrompt(ctx, contextKey, chatId, session, promptInput);
     } finally {
       await unlink(tempFilePath).catch(() => {});
+    }
+  });
+
+  bot.on("message:document", async (ctx) => {
+    const contextSession = await getContextSession(ctx);
+    if (!contextSession) {
+      return;
+    }
+
+    const { contextKey, session } = contextSession;
+    const chatId = ctx.chat.id;
+    if (isBusy(contextKey)) {
+      await sendBusyReply(ctx);
+      return;
+    }
+
+    const doc = ctx.message.document;
+    if (!doc) {
+      return;
+    }
+
+    if (doc.file_size && doc.file_size > config.maxFileSize) {
+      const sizeMB = Math.round(doc.file_size / 1024 / 1024);
+      const maxMB = Math.round(config.maxFileSize / 1024 / 1024);
+      await safeReply(ctx, `<b>File too large</b> (${sizeMB} MB, max ${maxMB} MB)`, {
+        fallbackText: `File too large (${sizeMB} MB, max ${maxMB} MB)`,
+      });
+      return;
+    }
+
+    const busyState = getBusyState(contextKey);
+    busyState.transcribing = true;
+    let tempFilePath: string | undefined;
+
+    try {
+      await ctx.api.sendChatAction(chatId, "typing");
+      tempFilePath = await downloadTelegramFile(ctx.api, config.telegramBotToken, doc.file_id, config.maxFileSize);
+    } catch (error) {
+      await safeReply(ctx, `<b>Failed to download file:</b> ${escapeHTML(formatError(error))}`, {
+        fallbackText: `Failed to download file: ${formatError(error)}`,
+      });
+      return;
+    } finally {
+      busyState.transcribing = false;
+    }
+
+    const turnId = randomUUID().slice(0, 12);
+    const workspace = session.getCurrentWorkspace();
+    const originalName = doc.file_name ?? "document";
+    const mimeType = doc.mime_type ?? "application/octet-stream";
+
+    let stagedFile: StagedFile;
+    try {
+      const buffer = await readFile(tempFilePath);
+      stagedFile = await stageFile(buffer, originalName, mimeType, {
+        workspace,
+        turnId,
+        maxFileSize: config.maxFileSize,
+      });
+    } catch (error) {
+      await safeReply(ctx, `<b>Failed to stage file:</b> ${escapeHTML(formatError(error))}`, {
+        fallbackText: `Failed to stage file: ${formatError(error)}`,
+      });
+      return;
+    } finally {
+      if (tempFilePath) {
+        await unlink(tempFilePath).catch(() => {});
+      }
+    }
+
+    await safeReply(ctx, `📎 <b>Received:</b> <code>${escapeHTML(stagedFile.safeName)}</code>`, {
+      fallbackText: `📎 Received: ${stagedFile.safeName}`,
+    });
+
+    const outDir = outboxPath(workspace, turnId);
+    await ensureOutDir(outDir);
+
+    const promptInput: CodexPromptInput = {
+      stagedFileInstructions: buildFileInstructions([stagedFile], outDir),
+    };
+    const caption = ctx.message.caption?.trim();
+    if (caption) {
+      promptInput.text = caption;
+    }
+
+    try {
+      await handleUserPrompt(ctx, contextKey, chatId, session, promptInput);
+    } finally {
+      try {
+        await deliverArtifacts(ctx, chatId, outDir);
+      } catch (artifactError) {
+        console.error("Failed to deliver artifacts:", artifactError);
+      } finally {
+        await cleanupInbox(workspace, turnId);
+        // TODO: prune old outbox turn folders by age or count to avoid unbounded growth
+      }
     }
   });
 

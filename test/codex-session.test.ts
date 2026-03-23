@@ -99,6 +99,7 @@ describe("CodexSessionService", () => {
     telegramAllowedUserIds: [123],
     telegramAllowedUserIdSet: new Set([123]),
     workspace: "/workspace/base",
+    maxFileSize: 20 * 1024 * 1024,
     codexApiKey: "codex-key",
     codexModel: "o3",
     codexSandboxMode: "workspace-write",
@@ -739,6 +740,35 @@ describe("CodexSessionService", () => {
         { type: "text", text: "describe this" },
         { type: "local_image", path: "/tmp/img.png" },
       ],
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+  });
+
+  it("prepends staged file instructions to the SDK input text", async () => {
+    const service = await CodexSessionService.create(createConfig());
+    const thread = mockState.createdThreads[0];
+    const callbacks = createCallbacks();
+
+    await service.prompt(
+      { text: "analyze this", stagedFileInstructions: "Files staged at /inbox:\n- log.txt" },
+      callbacks,
+    );
+
+    expect(thread.runStreamed).toHaveBeenCalledWith(
+      "Files staged at /inbox:\n- log.txt\n\nanalyze this",
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+  });
+
+  it("sends only staged file instructions when no user text", async () => {
+    const service = await CodexSessionService.create(createConfig());
+    const thread = mockState.createdThreads[0];
+    const callbacks = createCallbacks();
+
+    await service.prompt({ stagedFileInstructions: "Files staged at /inbox:\n- log.txt" }, callbacks);
+
+    expect(thread.runStreamed).toHaveBeenCalledWith(
+      "Files staged at /inbox:\n- log.txt",
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
   });

@@ -10,6 +10,7 @@ export interface TeleCodexConfig {
   telegramAllowedUserIds: number[];
   telegramAllowedUserIdSet: Set<number>;
   workspace: string;
+  maxFileSize: number;
   codexApiKey?: string;
   codexModel?: string;
   codexSandboxMode: CodexSandboxMode;
@@ -23,6 +24,7 @@ export function loadConfig(): TeleCodexConfig {
   const telegramBotToken = requireEnv("TELEGRAM_BOT_TOKEN");
   const telegramAllowedUserIds = parseAllowedUserIds(requireEnv("TELEGRAM_ALLOWED_USER_IDS"));
   const workspace = resolveWorkspace();
+  const maxFileSize = parseMaxFileSize(optionalString(process.env.MAX_FILE_SIZE));
   const codexApiKey = optionalString(process.env.CODEX_API_KEY);
   const codexModel = optionalString(process.env.CODEX_MODEL);
   const codexSandboxMode = parseSandboxMode(optionalString(process.env.CODEX_SANDBOX_MODE));
@@ -34,6 +36,7 @@ export function loadConfig(): TeleCodexConfig {
     telegramAllowedUserIds,
     telegramAllowedUserIdSet: new Set(telegramAllowedUserIds),
     workspace,
+    maxFileSize,
     codexApiKey,
     codexModel,
     codexSandboxMode,
@@ -125,6 +128,20 @@ function parseAllowedUserIds(raw: string): number[] {
   }
 
   return ids;
+}
+
+function parseMaxFileSize(raw: string | undefined): number {
+  if (!raw) {
+    return 20 * 1024 * 1024;
+  }
+
+  const parsed = Number(raw);
+  if (Number.isNaN(parsed) || parsed <= 0) {
+    console.warn(`Invalid MAX_FILE_SIZE value: "${raw}". Falling back to 20 MB.`);
+    return 20 * 1024 * 1024;
+  }
+
+  return parsed;
 }
 
 function parseSandboxMode(raw: string | undefined): CodexSandboxMode {

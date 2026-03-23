@@ -75,6 +75,7 @@ describe("SessionRegistry", () => {
     telegramAllowedUserIds: [123],
     telegramAllowedUserIdSet: new Set([123]),
     workspace: "/workspace/base",
+    maxFileSize: 20 * 1024 * 1024,
     codexApiKey: "codex-key",
     codexModel: "o3",
     codexSandboxMode: "workspace-write",

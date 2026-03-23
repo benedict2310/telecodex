@@ -20,6 +20,7 @@ describe("loadConfig", () => {
     delete process.env.CODEX_SANDBOX_MODE;
     delete process.env.CODEX_APPROVAL_POLICY;
     delete process.env.TOOL_VERBOSITY;
+    delete process.env.MAX_FILE_SIZE;
     delete process.env.container;
   });
 
@@ -60,6 +61,7 @@ describe("loadConfig", () => {
       telegramAllowedUserIds: [123, 456],
       telegramAllowedUserIdSet: new Set([123, 456]),
       workspace: process.cwd(),
+      maxFileSize: 20 * 1024 * 1024,
       codexApiKey: "secret-key",
       codexModel: "o3",
       codexSandboxMode: "danger-full-access",
@@ -76,6 +78,7 @@ describe("loadConfig", () => {
 
     expect(config.codexApiKey).toBeUndefined();
     expect(config.codexModel).toBeUndefined();
+    expect(config.maxFileSize).toBe(20 * 1024 * 1024);
     expect(config.codexSandboxMode).toBe("workspace-write");
     expect(config.codexApprovalPolicy).toBe("never");
     expect(config.toolVerbosity).toBe("summary");
@@ -135,6 +138,16 @@ describe("loadConfig", () => {
     expect(config.workspace).toBe("/workspace");
   });
 
+  it("parses MAX_FILE_SIZE when configured", () => {
+    process.env.TELEGRAM_BOT_TOKEN = "bot-token";
+    process.env.TELEGRAM_ALLOWED_USER_IDS = "123";
+    process.env.MAX_FILE_SIZE = String(5 * 1024 * 1024);
+
+    const config = loadConfig();
+
+    expect(config.maxFileSize).toBe(5 * 1024 * 1024);
+  });
+
   it("falls back to defaults for invalid optional enum values", () => {
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     process.env.TELEGRAM_BOT_TOKEN = "bot-token";
@@ -142,12 +155,14 @@ describe("loadConfig", () => {
     process.env.CODEX_SANDBOX_MODE = "unsafe";
     process.env.CODEX_APPROVAL_POLICY = "sometimes";
     process.env.TOOL_VERBOSITY = "loud";
+    process.env.MAX_FILE_SIZE = "nope";
 
     const config = loadConfig();
 
     expect(config.codexSandboxMode).toBe("workspace-write");
     expect(config.codexApprovalPolicy).toBe("never");
     expect(config.toolVerbosity).toBe("summary");
-    expect(warnSpy).toHaveBeenCalledTimes(3);
+    expect(config.maxFileSize).toBe(20 * 1024 * 1024);
+    expect(warnSpy).toHaveBeenCalledTimes(4);
   });
 });

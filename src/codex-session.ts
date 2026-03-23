@@ -52,6 +52,8 @@ export interface CreateOptions {
   resumeThreadId?: string;
 }
 
+export type CodexPromptInput = string | { text?: string; imagePaths?: string[]; stagedFileInstructions?: string };
+
 export class CodexSessionService {
   private readonly codex: Codex;
   private thread: Thread | null = null;
@@ -118,10 +120,7 @@ export class CodexSessionService {
     return this.currentWorkspace;
   }
 
-  async prompt(
-    input: string | { text?: string; imagePaths?: string[] },
-    callbacks: CodexSessionCallbacks,
-  ): Promise<void> {
+  async prompt(input: CodexPromptInput, callbacks: CodexSessionCallbacks): Promise<void> {
     if (!this.thread) {
       throw new Error("Codex thread is not initialized");
     }
@@ -330,23 +329,31 @@ export class CodexSessionService {
     this.currentThreadId = null;
   }
 
-  private buildSdkInput(input: string | { text?: string; imagePaths?: string[] }): Input {
+  private buildSdkInput(input: CodexPromptInput): Input {
     if (typeof input === "string") {
       return input;
     }
 
     const parts: UserInput[] = [];
-    if (input.text) {
-      parts.push({ type: "text", text: input.text });
+    const textParts: string[] = [];
+
+    if (input.stagedFileInstructions) {
+      textParts.push(input.stagedFileInstructions);
     }
+    if (input.text) {
+      textParts.push(input.text);
+    }
+    if (textParts.length > 0) {
+      parts.push({ type: "text", text: textParts.join("\n\n") });
+    }
+
     for (const imagePath of input.imagePaths ?? []) {
       parts.push({ type: "local_image", path: imagePath });
     }
-    // No parts at all — fall back to empty string rather than passing [] to the SDK
+
     if (parts.length === 0) {
       return "";
     }
-    // Single plain-text part — pass as a bare string (SDK accepts both forms)
     if (parts.length === 1 && parts[0]?.type === "text") {
       return parts[0].text;
     }
