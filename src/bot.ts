@@ -19,6 +19,8 @@ const TOOL_OUTPUT_PREVIEW_LIMIT = 500;
 const STREAMING_PREVIEW_LIMIT = 3800;
 const FORMATTED_CHUNK_TARGET = 3000;
 const MAX_AUDIO_FILE_SIZE = 25 * 1024 * 1024;
+const KEYBOARD_PAGE_SIZE = 6;
+const NOOP_PAGE_CALLBACK_DATA = "noop_page";
 
 type TelegramChatId = number | string;
 type TelegramParseMode = "HTML";
@@ -47,6 +49,33 @@ type RenderedChunk = RenderedText & {
   sourceText: string;
 };
 
+function paginateKeyboard(items: KeyboardItem[], page: number, prefix: string): InlineKeyboard {
+  const totalPages = Math.max(1, Math.ceil(items.length / KEYBOARD_PAGE_SIZE));
+  const currentPage = Math.min(Math.max(page, 0), totalPages - 1);
+  const start = currentPage * KEYBOARD_PAGE_SIZE;
+  const pageItems = items.slice(start, start + KEYBOARD_PAGE_SIZE);
+  const keyboard = new InlineKeyboard();
+
+  pageItems.forEach((item, index) => {
+    keyboard.text(item.label, item.callbackData);
+    if (index < pageItems.length - 1 || totalPages > 1) {
+      keyboard.row();
+    }
+  });
+
+  if (totalPages > 1) {
+    if (currentPage > 0) {
+      keyboard.text("◀️ Prev", `${prefix}_page_${currentPage - 1}`);
+    }
+    keyboard.text(`${currentPage + 1}/${totalPages}`, NOOP_PAGE_CALLBACK_DATA);
+    if (currentPage < totalPages - 1) {
+      keyboard.text("Next ▶️", `${prefix}_page_${currentPage + 1}`);
+    }
+  }
+
+  return keyboard;
+}
+
 export function createBot(config: TeleCodexConfig, codexSession: CodexSessionService): Bot<Context> {
   const bot = new Bot<Context>(config.telegramBotToken);
   bot.api.config.use(autoRetry({ maxRetryAttempts: 3, maxDelaySeconds: 10 }));
@@ -56,8 +85,44 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
   let isTranscribing = false;
   const pendingSessionPicks = new Map<TelegramChatId, string[]>();
   const pendingWorkspacePicks = new Map<TelegramChatId, string[]>();
+  const pendingSessionButtons = new Map<TelegramChatId, KeyboardItem[]>();
+  const pendingWorkspaceButtons = new Map<TelegramChatId, KeyboardItem[]>();
+  const pendingModelButtons = new Map<TelegramChatId, KeyboardItem[]>();
+  const pendingNewModelButtons = new Map<TelegramChatId, KeyboardItem[]>();
+  const pendingEffortButtons = new Map<TelegramChatId, KeyboardItem[]>();
 
   const isBusy = (): boolean => isProcessing || isSwitching || isTranscribing || codexSession.isProcessing();
+
+  const handlePageCallback = (
+    pattern: RegExp,
+    prefix: string,
+    buttonsMap: Map<TelegramChatId, KeyboardItem[]>,
+    expiredMessage: string,
+  ): void => {
+    bot.callbackQuery(pattern, async (ctx) => {
+      const chatId = ctx.chat?.id;
+      const messageId = ctx.callbackQuery.message?.message_id;
+      const page = Number.parseInt(ctx.match?.[1] ?? "", 10);
+      if (!chatId || !messageId || Number.isNaN(page)) {
+        await ctx.answerCallbackQuery();
+        return;
+      }
+      const buttons = buttonsMap.get(chatId);
+      if (!buttons) {
+        await ctx.answerCallbackQuery({ text: expiredMessage });
+        return;
+      }
+      await ctx.answerCallbackQuery();
+      try {
+        const keyboard = paginateKeyboard(buttons, page, prefix);
+        await bot.api.editMessageReplyMarkup(chatId, messageId, { reply_markup: keyboard });
+      } catch (error) {
+        if (!isMessageNotModifiedError(error)) {
+          console.error(`Failed to update ${prefix} keyboard page`, error);
+        }
+      }
+    });
+  };
 
   const sendBusyReply = async (ctx: Context): Promise<void> => {
     await safeReply(ctx, escapeHTML("Still working on previous message..."), {
@@ -596,13 +661,12 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
 
     pendingWorkspacePicks.set(chatId, workspaces);
     const currentWorkspace = codexSession.getCurrentWorkspace();
-    const keyboard = buildGridKeyboard(
-      workspaces.map((workspace, index) => ({
-        label: `${workspace === currentWorkspace ? "📂" : "📁"} ${getWorkspaceShortName(workspace)}`,
-        callbackData: `ws_${index}`,
-      })),
-      2,
-    );
+    const workspaceButtons = workspaces.map((workspace, index) => ({
+      label: `${workspace === currentWorkspace ? "📂" : "📁"} ${getWorkspaceShortName(workspace)}`,
+      callbackData: `ws_${index}`,
+    }));
+    pendingWorkspaceButtons.set(chatId, workspaceButtons);
+    const keyboard = paginateKeyboard(workspaceButtons, 0, "ws");
 
     await safeReply(ctx, "<b>Select workspace for new thread:</b>", {
       fallbackText: "Select workspace for new thread:",
@@ -611,6 +675,11 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
   });
 
   bot.command("newmodel", async (ctx) => {
+    const chatId = ctx.chat?.id;
+    if (!chatId) {
+      return;
+    }
+
     if (isBusy()) {
       await safeReply(ctx, escapeHTML("Cannot create a new thread while a prompt is running."), {
         fallbackText: "Cannot create a new thread while a prompt is running.",
@@ -626,13 +695,12 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
       return;
     }
 
-    const keyboard = buildGridKeyboard(
-      models.map((model) => ({
-        label: model.displayName,
-        callbackData: `newmodel_${model.slug}`,
-      })),
-      2,
-    );
+    const modelButtons = models.map((model) => ({
+      label: model.displayName,
+      callbackData: `newmodel_${model.slug}`,
+    }));
+    pendingNewModelButtons.set(chatId, modelButtons);
+    const keyboard = paginateKeyboard(modelButtons, 0, "newmodel");
 
     await safeReply(ctx, "<b>Select a model for a new thread:</b>", {
       fallbackText: "Select a model for a new thread:",
@@ -777,7 +845,7 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
       return;
     }
 
-    const sessions = codexSession.listAllSessions(10);
+    const sessions = codexSession.listAllSessions(50);
     if (sessions.length === 0) {
       await safeReply(ctx, escapeHTML("No recent threads found."), {
         fallbackText: "No recent threads found.",
@@ -830,13 +898,12 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
     );
 
     const activeThreadId = codexSession.getInfo().threadId;
-    const keyboard = buildGridKeyboard(
-      orderedSessions.map((session, index) => ({
-        label: session.id === activeThreadId ? `Switch to ${index + 1} ← active` : `Switch to ${index + 1}`,
-        callbackData: `sess_${index}`,
-      })),
-      3,
-    );
+    const sessionButtons = orderedSessions.map((session, index) => ({
+      label: session.id === activeThreadId ? `Switch to ${index + 1} ← active` : `Switch to ${index + 1}`,
+      callbackData: `sess_${index}`,
+    }));
+    pendingSessionButtons.set(chatId, sessionButtons);
+    const keyboard = paginateKeyboard(sessionButtons, 0, "sess");
 
     await safeReply(
       ctx,
@@ -853,6 +920,11 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
   });
 
   bot.command("model", async (ctx) => {
+    const chatId = ctx.chat?.id;
+    if (!chatId) {
+      return;
+    }
+
     if (isBusy()) {
       await safeReply(ctx, escapeHTML("Cannot change model while a prompt is running."), {
         fallbackText: "Cannot change model while a prompt is running.",
@@ -869,13 +941,12 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
     }
 
     const currentModel = codexSession.getInfo().model ?? "(default)";
-    const keyboard = buildGridKeyboard(
-      models.map((model) => ({
-        label: `${model.displayName}${model.slug === currentModel ? " ✓" : ""}`,
-        callbackData: `model_${model.slug}`,
-      })),
-      2,
-    );
+    const modelButtons = models.map((model) => ({
+      label: `${model.displayName}${model.slug === currentModel ? " ✓" : ""}`,
+      callbackData: `model_${model.slug}`,
+    }));
+    pendingModelButtons.set(chatId, modelButtons);
+    const keyboard = paginateKeyboard(modelButtons, 0, "model");
 
     await safeReply(
       ctx,
@@ -890,15 +961,19 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
   });
 
   bot.command("effort", async (ctx) => {
+    const chatId = ctx.chat?.id;
+    if (!chatId) {
+      return;
+    }
+
     const efforts: ModelReasoningEffort[] = ["minimal", "low", "medium", "high", "xhigh"];
     const current = codexSession.getInfo().reasoningEffort;
-    const keyboard = buildGridKeyboard(
-      efforts.map((effort) => ({
-        label: effort === current ? `${effort} ✓` : effort,
-        callbackData: `effort_${effort}`,
-      })),
-      3,
-    );
+    const effortButtons = efforts.map((effort) => ({
+      label: effort === current ? `${effort} ✓` : effort,
+      callbackData: `effort_${effort}`,
+    }));
+    pendingEffortButtons.set(chatId, effortButtons);
+    const keyboard = paginateKeyboard(effortButtons, 0, "effort");
     const text = current
       ? `<b>Reasoning effort:</b> <code>${escapeHTML(current)}</code>\n\nSelect for new threads:`
       : `<b>Reasoning effort:</b> not set (model default)\n\nSelect for new threads:`;
@@ -907,6 +982,15 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
       replyMarkup: keyboard,
     });
   });
+
+  bot.callbackQuery(NOOP_PAGE_CALLBACK_DATA, async (ctx) => {
+    await ctx.answerCallbackQuery();
+  });
+  handlePageCallback(/^sess_page_(\d+)$/, "sess", pendingSessionButtons, "Expired, run /sessions again");
+  handlePageCallback(/^ws_page_(\d+)$/, "ws", pendingWorkspaceButtons, "Expired, run /new again");
+  handlePageCallback(/^model_page_(\d+)$/, "model", pendingModelButtons, "Expired, run /model again");
+  handlePageCallback(/^newmodel_page_(\d+)$/, "newmodel", pendingNewModelButtons, "Expired, run /newmodel again");
+  handlePageCallback(/^effort_page_(\d+)$/, "effort", pendingEffortButtons, "Expired, run /effort again");
 
   bot.callbackQuery("codex_abort", async (ctx) => {
     await ctx.answerCallbackQuery({ text: "Aborting..." });
@@ -936,6 +1020,7 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
 
     await ctx.answerCallbackQuery({ text: "Switching..." });
     pendingSessionPicks.delete(chatId);
+    pendingSessionButtons.delete(chatId);
 
     isSwitching = true;
     try {
@@ -984,6 +1069,7 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
 
     await ctx.answerCallbackQuery({ text: "Creating thread..." });
     pendingWorkspacePicks.delete(chatId);
+    pendingWorkspaceButtons.delete(chatId);
 
     isSwitching = true;
     try {
@@ -1018,7 +1104,13 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
       return;
     }
 
-    const modelExists = codexSession.listModels().some((model) => model.slug === slug);
+    const buttons = pendingModelButtons.get(chatId);
+    if (!buttons) {
+      await ctx.answerCallbackQuery({ text: "Expired, run /model again" });
+      return;
+    }
+
+    const modelExists = buttons.some((button) => button.callbackData === `model_${slug}`);
     if (!modelExists) {
       await ctx.answerCallbackQuery({ text: "Expired, run /model again" });
       return;
@@ -1030,6 +1122,7 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
     }
 
     await ctx.answerCallbackQuery({ text: "Setting model..." });
+    pendingModelButtons.delete(chatId);
 
     try {
       const model = codexSession.setModel(slug);
@@ -1061,7 +1154,14 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
       return;
     }
 
+    const buttons = pendingEffortButtons.get(chatId);
+    if (!buttons || !buttons.some((button) => button.callbackData === `effort_${effort}`)) {
+      await ctx.answerCallbackQuery({ text: "Expired, run /effort again" });
+      return;
+    }
+
     await ctx.answerCallbackQuery({ text: `Effort set to ${effort}` });
+    pendingEffortButtons.delete(chatId);
     codexSession.setReasoningEffort(effort);
     const html = `⚡ Reasoning effort set to <code>${escapeHTML(effort)}</code> — applies to new threads.`;
     await safeEditMessage(bot, chatId, messageId, html, {
@@ -1078,7 +1178,13 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
       return;
     }
 
-    const modelExists = codexSession.listModels().some((model) => model.slug === slug);
+    const buttons = pendingNewModelButtons.get(chatId);
+    if (!buttons) {
+      await ctx.answerCallbackQuery({ text: "Expired, run /newmodel again" });
+      return;
+    }
+
+    const modelExists = buttons.some((button) => button.callbackData === `newmodel_${slug}`);
     if (!modelExists) {
       await ctx.answerCallbackQuery({ text: "Expired, run /newmodel again" });
       return;
@@ -1090,6 +1196,7 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
     }
 
     await ctx.answerCallbackQuery({ text: "Creating thread..." });
+    pendingNewModelButtons.delete(chatId);
 
     isSwitching = true;
     try {
@@ -1436,19 +1543,6 @@ async function downloadTelegramFile(
   const tempPath = path.join(tmpdir(), `telecodex-file-${randomUUID()}${extension}`);
   await writeFile(tempPath, buffer);
   return tempPath;
-}
-
-function buildGridKeyboard(items: KeyboardItem[], columns = 2): InlineKeyboard {
-  const keyboard = new InlineKeyboard();
-
-  items.forEach((item, index) => {
-    keyboard.text(item.label, item.callbackData);
-    if ((index + 1) % columns === 0 && index < items.length - 1) {
-      keyboard.row();
-    }
-  });
-
-  return keyboard;
 }
 
 function splitTelegramText(text: string): string[] {
