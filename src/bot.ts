@@ -797,13 +797,13 @@ export function createBot(config: TeleCodexConfig, registry: SessionRegistry): B
         [
           "<b>Telegram-initiated login is disabled.</b>",
           "",
-          "Run <code>codex auth login</code> on the host, or set CODEX_API_KEY in .env.",
+          "Run <code>codex login</code> on the host, or set CODEX_API_KEY in .env.",
         ].join("\n"),
         {
           fallbackText: [
             "Telegram-initiated login is disabled.",
             "",
-            "Run 'codex auth login' on the host, or set CODEX_API_KEY in .env.",
+            "Run 'codex login' on the host, or set CODEX_API_KEY in .env.",
           ].join("\n"),
         },
       );
@@ -852,12 +852,12 @@ export function createBot(config: TeleCodexConfig, registry: SessionRegistry): B
       await safeReply(ctx, [
         "<b>Telegram-initiated auth management is disabled.</b>",
         "",
-        "Run <code>codex auth logout</code> on the host.",
+        "Run <code>codex logout</code> on the host.",
       ].join("\n"), {
         fallbackText: [
           "Telegram-initiated auth management is disabled.",
           "",
-          "Run 'codex auth logout' on the host.",
+          "Run 'codex logout' on the host.",
         ].join("\n"),
       });
       return;

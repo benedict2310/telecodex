@@ -22,7 +22,7 @@ let cachedAuthStatus: { status: AuthStatus; expiresAt: number } | undefined;
  *
  * Priority:
  * 1. If CODEX_API_KEY is set in the environment, report authenticated via API key.
- * 2. Otherwise, shell out to `codex auth status` to check CLI auth.
+ * 2. Otherwise, shell out to `codex login status` to check CLI auth.
  * 3. If the CLI command fails or is unavailable, report unauthenticated.
  *
  * Results are cached for 30 seconds to avoid per-message CLI invocations.
@@ -41,7 +41,7 @@ export async function checkAuthStatus(apiKey?: string): Promise<AuthStatus> {
   }
 
   try {
-    const { stdout } = await runCodexCommand(["auth", "status"]);
+    const { stdout } = await runCodexCommand(["login", "status"]);
     const output = stdout.trim();
     const status: AuthStatus = {
       authenticated: true,
@@ -66,13 +66,13 @@ export function clearAuthCache(): void {
 
 /**
  * Attempt to start a login flow via the Codex CLI.
- * Uses --no-open to prevent opening a browser on headless/remote hosts.
+ * Uses --device-auth to get a device code flow suitable for headless/remote hosts.
  */
 export async function startLogin(): Promise<LoginResult> {
   clearAuthCache();
 
   try {
-    const { stdout } = await runCodexCommand(["auth", "login", "--no-open"]);
+    const { stdout } = await runCodexCommand(["login", "--device-auth"]);
     const output = stdout.trim();
     return {
       success: true,
@@ -94,7 +94,7 @@ export async function startLogout(): Promise<LoginResult> {
   clearAuthCache();
 
   try {
-    const { stdout } = await runCodexCommand(["auth", "logout"]);
+    const { stdout } = await runCodexCommand(["logout"]);
     const output = stdout.trim();
     return {
       success: true,
