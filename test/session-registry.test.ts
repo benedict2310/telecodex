@@ -141,6 +141,28 @@ describe("SessionRegistry", () => {
     expect(mockSessionState.create).toHaveBeenCalledTimes(2);
   });
 
+  it("two topic contexts in the same chat maintain independent sessions", async () => {
+    const registry = new SessionRegistry(createConfig());
+
+    const first = await registry.getOrCreate("67890:1");
+    const second = await registry.getOrCreate("67890:2");
+
+    expect(first).not.toBe(second);
+    expect(registry.has("67890:1")).toBe(true);
+    expect(registry.has("67890:2")).toBe(true);
+  });
+
+  it("removing one topic context does not affect another in the same chat", async () => {
+    const registry = new SessionRegistry(createConfig());
+
+    await registry.getOrCreate("67890:1");
+    await registry.getOrCreate("67890:2");
+    registry.remove("67890:1");
+
+    expect(registry.has("67890:1")).toBe(false);
+    expect(registry.has("67890:2")).toBe(true);
+  });
+
   it("restores distinct per-context workspace, model, reasoning effort, and thread ids", async () => {
     const persistPath = path.join("/workspace/base", ".telecodex", "contexts.json");
     mockFsState.files.set(

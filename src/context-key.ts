@@ -24,3 +24,7 @@ export function parseContextKey(key: TelegramContextKey): { chatId: number; mess
   const messageThreadId = parts[1] ? Number(parts[1]) : undefined;
   return { chatId, messageThreadId };
 }
+
+export function isTopicContextKey(key: TelegramContextKey): boolean {
+  return key.includes(":");
+}

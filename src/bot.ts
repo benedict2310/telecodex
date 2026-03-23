@@ -21,8 +21,9 @@ import {
   type CodexSessionInfo,
   type CodexSessionService,
 } from "./codex-session.js";
+import { getThread } from "./codex-state.js";
 import type { TeleCodexConfig, ToolVerbosity } from "./config.js";
-import { contextKeyFromCtx, type TelegramContextKey } from "./context-key.js";
+import { contextKeyFromCtx, isTopicContextKey, parseContextKey, type TelegramContextKey } from "./context-key.js";
 import { escapeHTML, formatTelegramHTML } from "./format.js";
 import { SessionRegistry } from "./session-registry.js";
 import { getAvailableBackends, transcribeAudio } from "./voice.js";
@@ -52,6 +53,7 @@ type TextOptions = {
   parseMode?: TelegramParseMode;
   fallbackText?: string;
   replyMarkup?: InlineKeyboard;
+  messageThreadId?: number;
 };
 
 type RenderedText = {
@@ -141,6 +143,8 @@ export function createBot(config: TeleCodexConfig, registry: SessionRegistry): B
     registry.updateMetadata(contextKey, session);
   };
 
+  const isTopicContext = (contextKey: TelegramContextKey): boolean => isTopicContextKey(contextKey);
+
   const handlePageCallback = (
     pattern: RegExp,
     prefix: string,
@@ -211,6 +215,9 @@ export function createBot(config: TeleCodexConfig, registry: SessionRegistry): B
     session: CodexSessionService,
     userInput: CodexPromptInput,
   ): Promise<void> => {
+    const parsed = parseContextKey(contextKey);
+    const messageThreadId = parsed.messageThreadId;
+
     if (isBusy(contextKey)) {
       await sendBusyReply(ctx);
       return;
@@ -238,9 +245,17 @@ export function createBot(config: TeleCodexConfig, registry: SessionRegistry): B
     let lastTurnUsage: { inputTokens: number; cachedInputTokens: number; outputTokens: number } | undefined;
 
     const typingInterval = setInterval(() => {
-      void bot.api.sendChatAction(chatId, "typing").catch(() => {});
+      void bot.api
+        .sendChatAction(chatId, "typing", {
+          ...(messageThreadId ? { message_thread_id: messageThreadId } : {}),
+        })
+        .catch(() => {});
     }, TYPING_INTERVAL_MS);
-    void bot.api.sendChatAction(chatId, "typing").catch(() => {});
+    void bot.api
+      .sendChatAction(chatId, "typing", {
+        ...(messageThreadId ? { message_thread_id: messageThreadId } : {}),
+      })
+      .catch(() => {});
 
     const stopTyping = (): void => {
       clearInterval(typingInterval);
@@ -295,6 +310,7 @@ export function createBot(config: TeleCodexConfig, registry: SessionRegistry): B
           parseMode: preview.parseMode,
           fallbackText: preview.fallbackText,
           replyMarkup: abortKeyboard,
+          messageThreadId,
         });
         responseMessageId = message.message_id;
         lastRenderedText = preview.text;
@@ -395,6 +411,7 @@ export function createBot(config: TeleCodexConfig, registry: SessionRegistry): B
         const message = await sendTextMessage(bot.api, chatId, firstChunk.text, {
           parseMode: firstChunk.parseMode,
           fallbackText: firstChunk.fallbackText,
+          messageThreadId,
         });
         responseMessageId = message.message_id;
       }
@@ -403,6 +420,7 @@ export function createBot(config: TeleCodexConfig, registry: SessionRegistry): B
         await sendTextMessage(bot.api, chatId, chunk.text, {
           parseMode: chunk.parseMode,
           fallbackText: chunk.fallbackText,
+          messageThreadId,
         });
       }
     };
@@ -477,6 +495,7 @@ export function createBot(config: TeleCodexConfig, registry: SessionRegistry): B
           const message = await sendTextMessage(bot.api, chatId, messageText.text, {
             parseMode: messageText.parseMode,
             fallbackText: messageText.fallbackText,
+            messageThreadId,
           });
           const state = toolStates.get(toolCallId);
           if (!state) {
@@ -525,6 +544,7 @@ export function createBot(config: TeleCodexConfig, registry: SessionRegistry): B
           void sendTextMessage(bot.api, chatId, state.finalStatus.text, {
             parseMode: state.finalStatus.parseMode,
             fallbackText: state.finalStatus.fallbackText,
+            messageThreadId,
           }).catch((error) => {
             console.error(`Failed to send tool error message for ${state.toolName}`, error);
           });
@@ -556,7 +576,7 @@ export function createBot(config: TeleCodexConfig, registry: SessionRegistry): B
         if (!planMessageId) {
           if (planMessageSending) return;
           planMessageSending = true;
-          void sendTextMessage(bot.api, chatId, rendered, { parseMode: "HTML" })
+          void sendTextMessage(bot.api, chatId, rendered, { parseMode: "HTML", messageThreadId })
             .then((msg) => {
               planMessageId = msg.message_id;
             })
@@ -621,19 +641,30 @@ export function createBot(config: TeleCodexConfig, registry: SessionRegistry): B
     }
   };
 
-  const deliverArtifacts = async (ctx: Context, chatId: TelegramChatId, outDir: string): Promise<void> => {
+  const deliverArtifacts = async (
+    ctx: Context,
+    chatId: TelegramChatId,
+    outDir: string,
+    messageThreadId?: number,
+  ): Promise<void> => {
     const { artifacts, skippedCount } = await collectArtifactReport(outDir);
 
     if (artifacts.length === 0 && skippedCount === 0) {
       return;
     }
 
-    await ctx.api.sendChatAction(chatId, "upload_document").catch(() => {});
+    await ctx.api
+      .sendChatAction(chatId, "upload_document", {
+        ...(messageThreadId ? { message_thread_id: messageThreadId } : {}),
+      })
+      .catch(() => {});
 
     let failedCount = 0;
     for (const artifact of artifacts) {
       try {
-        await ctx.api.sendDocument(chatId, new InputFile(artifact.localPath, artifact.name));
+        await ctx.api.sendDocument(chatId, new InputFile(artifact.localPath, artifact.name), {
+          ...(messageThreadId ? { message_thread_id: messageThreadId } : {}),
+        });
       } catch (error) {
         failedCount += 1;
         console.error(`Failed to send artifact ${artifact.name}:`, error);
@@ -666,12 +697,13 @@ export function createBot(config: TeleCodexConfig, registry: SessionRegistry): B
       return;
     }
 
-    const { session } = contextSession;
+    const { contextKey, session } = contextSession;
     const info = session.getInfo();
     const voiceBackends = await getAvailableBackends().catch(() => []);
     const voiceStatus = formatVoiceStatus(voiceBackends);
+    const readyMsg = isTopicContext(contextKey) ? "TeleCodex is ready (topic session)." : "TeleCodex is ready.";
     const plainText = [
-      "TeleCodex is ready.",
+      readyMsg,
       "",
       "Send any text message to continue the current Codex thread from Telegram.",
       "Send a voice message or audio file to transcribe it into a Codex prompt.",
@@ -682,7 +714,7 @@ export function createBot(config: TeleCodexConfig, registry: SessionRegistry): B
       renderSessionInfoPlain(info),
     ].join("\n");
     const html = [
-      "<b>TeleCodex is ready.</b>",
+      `<b>${escapeHTML(readyMsg)}</b>`,
       "",
       "Send any text message to continue the current Codex thread from Telegram.",
       "Send a voice message or audio file to transcribe it into a Codex prompt.",
@@ -754,8 +786,9 @@ export function createBot(config: TeleCodexConfig, registry: SessionRegistry): B
       try {
         const info = await session.newThread();
         updateSessionMetadata(contextKey, session);
-        const plainText = `New thread created.\n\n${renderSessionInfoPlain(info)}`;
-        const html = `<b>New thread created.</b>\n\n${renderSessionInfoHTML(info)}`;
+        const label = isTopicContext(contextKey) ? "New thread created for this topic." : "New thread created.";
+        const plainText = `${label}\n\n${renderSessionInfoPlain(info)}`;
+        const html = `<b>${escapeHTML(label)}</b>\n\n${renderSessionInfoHTML(info)}`;
         await safeReply(ctx, html, { fallbackText: plainText });
       } catch (error) {
         await safeReply(ctx, `<b>Failed:</b> ${escapeHTML(formatError(error))}`, {
@@ -805,11 +838,14 @@ export function createBot(config: TeleCodexConfig, registry: SessionRegistry): B
       return;
     }
 
-    const { session } = contextSession;
+    const { contextKey, session } = contextSession;
     const info = session.getInfo();
-    await safeReply(ctx, renderSessionInfoHTML(info), {
-      fallbackText: renderSessionInfoPlain(info),
-    });
+    const contextLabel = isTopicContext(contextKey) ? "Topic session" : "Chat session";
+
+    const plainLines = [`${contextLabel}:`, renderSessionInfoPlain(info)];
+    const htmlLines = [`<b>${escapeHTML(contextLabel)}:</b>`, renderSessionInfoHTML(info)];
+
+    await safeReply(ctx, htmlLines.join("\n"), { fallbackText: plainLines.join("\n") });
   });
 
   bot.command("handback", async (ctx) => {
@@ -900,6 +936,54 @@ export function createBot(config: TeleCodexConfig, registry: SessionRegistry): B
       await safeReply(ctx, `<b>Failed:</b> ${escapeHTML(formatError(error))}`, {
         fallbackText: `Failed: ${formatError(error)}`,
       });
+    }
+  });
+
+  bot.command("attach", async (ctx) => {
+    const contextSession = await getContextSession(ctx);
+    if (!contextSession) {
+      return;
+    }
+
+    const { contextKey, session } = contextSession;
+    if (isBusy(contextKey)) {
+      await safeReply(ctx, escapeHTML("Cannot attach while a prompt is running."), {
+        fallbackText: "Cannot attach while a prompt is running.",
+      });
+      return;
+    }
+
+    const rawText = ctx.message?.text ?? "";
+    const threadId = rawText.replace(/^\/attach(?:@\w+)?\s*/, "").trim();
+
+    if (!threadId) {
+      await safeReply(ctx, escapeHTML("Usage: /attach <thread-id>"), {
+        fallbackText: "Usage: /attach <thread-id>",
+      });
+      return;
+    }
+
+    if (!getThread(threadId)) {
+      await safeReply(ctx, `<b>Failed:</b> ${escapeHTML(`Unknown Codex thread: ${threadId}`)}`, {
+        fallbackText: `Failed: Unknown Codex thread: ${threadId}`,
+      });
+      return;
+    }
+
+    const busyState = getBusyState(contextKey);
+    busyState.switching = true;
+    try {
+      const info = await session.switchSession(threadId);
+      updateSessionMetadata(contextKey, session);
+      const html = `<b>Attached to thread.</b>\n\n${renderSessionInfoHTML(info)}`;
+      const plain = `Attached to thread.\n\n${renderSessionInfoPlain(info)}`;
+      await safeReply(ctx, html, { fallbackText: plain });
+    } catch (error) {
+      await safeReply(ctx, `<b>Failed:</b> ${escapeHTML(formatError(error))}`, {
+        fallbackText: `Failed: ${formatError(error)}`,
+      });
+    } finally {
+      busyState.switching = false;
     }
   });
 
@@ -1186,8 +1270,9 @@ export function createBot(config: TeleCodexConfig, registry: SessionRegistry): B
     try {
       const info = await session.newThread(workspace);
       updateSessionMetadata(contextKey, session);
-      const plainText = `New thread created.\n\n${renderSessionInfoPlain(info)}`;
-      const html = `<b>New thread created.</b>\n\n${renderSessionInfoHTML(info)}`;
+      const label = isTopicContext(contextKey) ? "New thread created for this topic." : "New thread created.";
+      const plainText = `${label}\n\n${renderSessionInfoPlain(info)}`;
+      const html = `<b>${escapeHTML(label)}</b>\n\n${renderSessionInfoHTML(info)}`;
 
       if (messageId) {
         await safeEditMessage(bot, chatId, messageId, html, { fallbackText: plainText });
@@ -1508,7 +1593,7 @@ export function createBot(config: TeleCodexConfig, registry: SessionRegistry): B
       await handleUserPrompt(ctx, contextKey, chatId, session, promptInput);
     } finally {
       try {
-        await deliverArtifacts(ctx, chatId, outDir);
+        await deliverArtifacts(ctx, chatId, outDir, parseContextKey(contextKey).messageThreadId);
       } catch (artifactError) {
         console.error("Failed to deliver artifacts:", artifactError);
       } finally {
@@ -1531,6 +1616,7 @@ export async function registerCommands(bot: Bot<Context>): Promise<void> {
     { command: "start", description: "Welcome and thread info" },
     { command: "new", description: "Start a new thread" },
     { command: "handback", description: "Hand thread back to Codex CLI" },
+    { command: "attach", description: "Bind an existing Codex thread to this topic" },
     { command: "abort", description: "Cancel current operation" },
     { command: "session", description: "Current thread details" },
     { command: "sessions", description: "Browse and switch recent threads" },
@@ -1635,6 +1721,8 @@ async function safeReply(ctx: Context, text: string, options: TextOptions = {}):
   }
 
   const parseMode = options.parseMode !== undefined ? options.parseMode : ("HTML" as TelegramParseMode);
+  const messageThreadId =
+    options.messageThreadId ?? ctx.message?.message_thread_id ?? ctx.callbackQuery?.message?.message_thread_id;
 
   const chunks = splitTelegramText(text);
   const fallbackChunks = options.fallbackText ? splitTelegramText(options.fallbackText) : [];
@@ -1644,6 +1732,7 @@ async function safeReply(ctx: Context, text: string, options: TextOptions = {}):
       parseMode,
       fallbackText: fallbackChunks[index] ?? chunk,
       replyMarkup: index === 0 ? options.replyMarkup : undefined,
+      messageThreadId,
     });
   }
 }
@@ -1659,11 +1748,13 @@ async function sendTextMessage(
   try {
     return await api.sendMessage(chatId, text, {
       ...(parseMode ? { parse_mode: parseMode } : {}),
+      ...(options.messageThreadId ? { message_thread_id: options.messageThreadId } : {}),
       reply_markup: options.replyMarkup,
     });
   } catch (error) {
     if (parseMode && options.fallbackText !== undefined && isTelegramParseError(error)) {
       return await api.sendMessage(chatId, options.fallbackText, {
+        ...(options.messageThreadId ? { message_thread_id: options.messageThreadId } : {}),
         reply_markup: options.replyMarkup,
       });
     }

@@ -1,6 +1,6 @@
 import type { Context } from "grammy";
 
-import { contextKeyFromCtx, contextKeyFromMessage, parseContextKey } from "../src/context-key.js";
+import { contextKeyFromCtx, contextKeyFromMessage, isTopicContextKey, parseContextKey } from "../src/context-key.js";
 
 describe("context-key", () => {
   it("uses only chat id for private chats", () => {
@@ -49,5 +49,10 @@ describe("context-key", () => {
 
     expect(parseContextKey(key)).toEqual({ chatId: 67890, messageThreadId: 42 });
     expect(contextKeyFromMessage(parseContextKey(key).chatId, parseContextKey(key).messageThreadId)).toBe(key);
+  });
+
+  it("identifies topic context keys", () => {
+    expect(isTopicContextKey("67890:42")).toBe(true);
+    expect(isTopicContextKey("12345")).toBe(false);
   });
 });
