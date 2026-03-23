@@ -81,6 +81,7 @@ describe("SessionRegistry", () => {
     codexSandboxMode: "workspace-write",
     codexApprovalPolicy: "never",
     toolVerbosity: "summary",
+    enableTelegramLogin: true,
     ...overrides,
   });
 

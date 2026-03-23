@@ -21,6 +21,7 @@ describe("loadConfig", () => {
     delete process.env.CODEX_APPROVAL_POLICY;
     delete process.env.TOOL_VERBOSITY;
     delete process.env.MAX_FILE_SIZE;
+    delete process.env.ENABLE_TELEGRAM_LOGIN;
     delete process.env.container;
   });
 
@@ -67,6 +68,7 @@ describe("loadConfig", () => {
       codexSandboxMode: "danger-full-access",
       codexApprovalPolicy: "on-request",
       toolVerbosity: "all",
+      enableTelegramLogin: true,
     });
   });
 
@@ -82,6 +84,7 @@ describe("loadConfig", () => {
     expect(config.codexSandboxMode).toBe("workspace-write");
     expect(config.codexApprovalPolicy).toBe("never");
     expect(config.toolVerbosity).toBe("summary");
+    expect(config.enableTelegramLogin).toBe(true);
     expect(config.workspace).toBe(process.cwd());
   });
 
@@ -146,6 +149,30 @@ describe("loadConfig", () => {
     const config = loadConfig();
 
     expect(config.maxFileSize).toBe(5 * 1024 * 1024);
+  });
+
+  it("parses ENABLE_TELEGRAM_LOGIN boolean values", () => {
+    process.env.TELEGRAM_BOT_TOKEN = "bot-token";
+    process.env.TELEGRAM_ALLOWED_USER_IDS = "123";
+
+    const truthyValues = ["true", "1", "yes"];
+    const falsyValues = ["false", "0", "no"];
+
+    for (const value of truthyValues) {
+      process.env.ENABLE_TELEGRAM_LOGIN = value;
+      const config = loadConfig();
+      expect(config.enableTelegramLogin).toBe(true);
+    }
+
+    for (const value of falsyValues) {
+      process.env.ENABLE_TELEGRAM_LOGIN = value;
+      const config = loadConfig();
+      expect(config.enableTelegramLogin).toBe(false);
+    }
+
+    delete process.env.ENABLE_TELEGRAM_LOGIN;
+    const config = loadConfig();
+    expect(config.enableTelegramLogin).toBe(true);
   });
 
   it("falls back to defaults for invalid optional enum values", () => {

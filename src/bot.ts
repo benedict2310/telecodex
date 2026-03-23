@@ -21,6 +21,7 @@ import {
   type CodexSessionInfo,
   type CodexSessionService,
 } from "./codex-session.js";
+import { checkAuthStatus, clearAuthCache, startLogin, startLogout } from "./codex-auth.js";
 import { getThread } from "./codex-state.js";
 import type { TeleCodexConfig, ToolVerbosity } from "./config.js";
 import { contextKeyFromCtx, isTopicContextKey, parseContextKey, type TelegramContextKey } from "./context-key.js";
@@ -603,6 +604,30 @@ export function createBot(config: TeleCodexConfig, registry: SessionRegistry): B
     };
 
     try {
+      const authStatus = await checkAuthStatus(config.codexApiKey);
+      if (!authStatus.authenticated) {
+        await safeReply(
+          ctx,
+          [
+            "<b>⚠️ Codex is not authenticated.</b>",
+            "",
+            `<code>${escapeHTML(authStatus.detail)}</code>`,
+            "",
+            "Use /login to start authentication, or set CODEX_API_KEY on the host.",
+          ].join("\n"),
+          {
+            fallbackText: [
+              "⚠️ Codex is not authenticated.",
+              "",
+              authStatus.detail,
+              "",
+              "Use /login to start authentication, or set CODEX_API_KEY on the host.",
+            ].join("\n"),
+          },
+        );
+        return;
+      }
+
       if (!(await ensureActiveThread(ctx, contextKey, session))) {
         return;
       }
@@ -701,6 +726,8 @@ export function createBot(config: TeleCodexConfig, registry: SessionRegistry): B
     const info = session.getInfo();
     const voiceBackends = await getAvailableBackends().catch(() => []);
     const voiceStatus = formatVoiceStatus(voiceBackends);
+    const authStatus = await checkAuthStatus(config.codexApiKey);
+    const authIcon = authStatus.authenticated ? "✅" : "❌";
     const readyMsg = isTopicContext(contextKey) ? "TeleCodex is ready (topic session)." : "TeleCodex is ready.";
     const plainText = [
       readyMsg,
@@ -710,6 +737,7 @@ export function createBot(config: TeleCodexConfig, registry: SessionRegistry): B
       "Send a photo (with optional caption) to show Codex an image.",
       "Send a document to stage it for Codex and receive generated files back.",
       `Voice: ${voiceStatus}`,
+      `Auth: ${authIcon} ${authStatus.method}`,
       "",
       renderSessionInfoPlain(info),
     ].join("\n");
@@ -721,11 +749,138 @@ export function createBot(config: TeleCodexConfig, registry: SessionRegistry): B
       "Send a photo (with optional caption) to show Codex an image.",
       "Send a document to stage it for Codex and receive generated files back.",
       `<b>Voice:</b> <code>${escapeHTML(voiceStatus)}</code>`,
+      `<b>Auth:</b> ${authIcon} <code>${escapeHTML(authStatus.method)}</code>`,
       "",
       renderSessionInfoHTML(info),
     ].join("\n");
 
     await safeReply(ctx, html, { fallbackText: plainText });
+  });
+
+  bot.command("auth", async (ctx) => {
+    if (!ctx.chat) {
+      return;
+    }
+
+    const authStatus = await checkAuthStatus(config.codexApiKey);
+    const icon = authStatus.authenticated ? "✅" : "❌";
+    const html = [
+      `<b>${icon} Auth status:</b> ${authStatus.authenticated ? "authenticated" : "not authenticated"}`,
+      `<b>Method:</b> <code>${escapeHTML(authStatus.method)}</code>`,
+      `<b>Detail:</b> <code>${escapeHTML(authStatus.detail)}</code>`,
+    ].join("\n");
+    const plain = [
+      `${icon} Auth status: ${authStatus.authenticated ? "authenticated" : "not authenticated"}`,
+      `Method: ${authStatus.method}`,
+      `Detail: ${authStatus.detail}`,
+    ].join("\n");
+
+    await safeReply(ctx, html, { fallbackText: plain });
+  });
+
+  bot.command("login", async (ctx) => {
+    if (!ctx.chat) {
+      return;
+    }
+
+    const authStatus = await checkAuthStatus(config.codexApiKey);
+    if (authStatus.authenticated) {
+      await safeReply(ctx, `<b>✅ Already authenticated</b> via <code>${escapeHTML(authStatus.method)}</code>.`, {
+        fallbackText: `✅ Already authenticated via ${authStatus.method}.`,
+      });
+      return;
+    }
+
+    if (!config.enableTelegramLogin) {
+      await safeReply(
+        ctx,
+        [
+          "<b>Telegram-initiated login is disabled.</b>",
+          "",
+          "Run <code>codex auth login</code> on the host, or set CODEX_API_KEY in .env.",
+        ].join("\n"),
+        {
+          fallbackText: [
+            "Telegram-initiated login is disabled.",
+            "",
+            "Run 'codex auth login' on the host, or set CODEX_API_KEY in .env.",
+          ].join("\n"),
+        },
+      );
+      return;
+    }
+
+    const result = await startLogin();
+    if (result.success) {
+      await safeReply(ctx, `<b>🔑 Login initiated.</b>\n\n<code>${escapeHTML(result.message)}</code>`, {
+        fallbackText: `🔑 Login initiated.\n\n${result.message}`,
+      });
+      return;
+    }
+
+    await safeReply(ctx, `<b>❌ Login failed.</b>\n\n<code>${escapeHTML(result.message)}</code>`, {
+      fallbackText: `❌ Login failed.\n\n${result.message}`,
+    });
+  });
+
+  bot.command("logout", async (ctx) => {
+    if (!ctx.chat) {
+      return;
+    }
+
+    const authStatus = await checkAuthStatus(config.codexApiKey);
+    if (authStatus.method === "api-key") {
+      await safeReply(
+        ctx,
+        [
+          "<b>Cannot logout via Telegram when using CODEX_API_KEY.</b>",
+          "",
+          "Remove CODEX_API_KEY from .env to use CLI-based auth instead.",
+        ].join("\n"),
+        {
+          fallbackText: [
+            "Cannot logout via Telegram when using CODEX_API_KEY.",
+            "",
+            "Remove CODEX_API_KEY from .env to use CLI-based auth instead.",
+          ].join("\n"),
+        },
+      );
+      return;
+    }
+
+    if (!config.enableTelegramLogin) {
+      await safeReply(ctx, [
+        "<b>Telegram-initiated auth management is disabled.</b>",
+        "",
+        "Run <code>codex auth logout</code> on the host.",
+      ].join("\n"), {
+        fallbackText: [
+          "Telegram-initiated auth management is disabled.",
+          "",
+          "Run 'codex auth logout' on the host.",
+        ].join("\n"),
+      });
+      return;
+    }
+
+    if (!authStatus.authenticated) {
+      await safeReply(ctx, escapeHTML("Not currently authenticated."), {
+        fallbackText: "Not currently authenticated.",
+      });
+      return;
+    }
+
+    const result = await startLogout();
+    if (result.success) {
+      await safeReply(ctx, `<b>🔓 Logged out.</b>\n\n${escapeHTML(result.message)}`, {
+        fallbackText: `🔓 Logged out.\n\n${result.message}`,
+      });
+      return;
+    }
+
+    await safeReply(ctx, `<b>❌ Logout failed.</b>\n\n<code>${escapeHTML(result.message)}</code>`, {
+      fallbackText: `❌ Logout failed.\n\n${result.message}`,
+    });
   });
 
   bot.command("voice", async (ctx) => {
@@ -1614,6 +1769,9 @@ export function createBot(config: TeleCodexConfig, registry: SessionRegistry): B
 export async function registerCommands(bot: Bot<Context>): Promise<void> {
   await bot.api.setMyCommands([
     { command: "start", description: "Welcome and thread info" },
+    { command: "auth", description: "Check Codex authentication status" },
+    { command: "login", description: "Start Codex authentication" },
+    { command: "logout", description: "Sign out of Codex" },
     { command: "new", description: "Start a new thread" },
     { command: "handback", description: "Hand thread back to Codex CLI" },
     { command: "attach", description: "Bind an existing Codex thread to this topic" },

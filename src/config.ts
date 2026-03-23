@@ -16,6 +16,7 @@ export interface TeleCodexConfig {
   codexSandboxMode: CodexSandboxMode;
   codexApprovalPolicy: CodexApprovalPolicy;
   toolVerbosity: ToolVerbosity;
+  enableTelegramLogin: boolean;
 }
 
 export function loadConfig(): TeleCodexConfig {
@@ -30,6 +31,7 @@ export function loadConfig(): TeleCodexConfig {
   const codexSandboxMode = parseSandboxMode(optionalString(process.env.CODEX_SANDBOX_MODE));
   const codexApprovalPolicy = parseApprovalPolicy(optionalString(process.env.CODEX_APPROVAL_POLICY));
   const toolVerbosity = parseToolVerbosity(optionalString(process.env.TOOL_VERBOSITY));
+  const enableTelegramLogin = parseBooleanEnv(optionalString(process.env.ENABLE_TELEGRAM_LOGIN), true);
 
   return {
     telegramBotToken,
@@ -42,6 +44,7 @@ export function loadConfig(): TeleCodexConfig {
     codexSandboxMode,
     codexApprovalPolicy,
     toolVerbosity,
+    enableTelegramLogin,
   };
 }
 
@@ -128,6 +131,23 @@ function parseAllowedUserIds(raw: string): number[] {
   }
 
   return ids;
+}
+
+function parseBooleanEnv(raw: string | undefined, defaultValue: boolean): boolean {
+  if (!raw) {
+    return defaultValue;
+  }
+
+  const lower = raw.toLowerCase();
+  if (lower === "true" || lower === "1" || lower === "yes") {
+    return true;
+  }
+  if (lower === "false" || lower === "0" || lower === "no") {
+    return false;
+  }
+
+  console.warn(`Invalid boolean env value: "${raw}". Falling back to ${defaultValue}.`);
+  return defaultValue;
 }
 
 function parseMaxFileSize(raw: string | undefined): number {

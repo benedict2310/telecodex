@@ -1,4 +1,5 @@
 import { createBot, registerCommands } from "./bot.js";
+import { checkAuthStatus } from "./codex-auth.js";
 import { loadConfig } from "./config.js";
 import { SessionRegistry } from "./session-registry.js";
 
@@ -12,6 +13,11 @@ try {
   await registerCommands(bot);
 
   console.log("TeleCodex running");
+  const authStatus = await checkAuthStatus(config.codexApiKey);
+  console.log(`Auth: ${authStatus.authenticated ? "authenticated" : "not authenticated"} (${authStatus.method})`);
+  if (!authStatus.authenticated) {
+    console.warn("Warning: Codex is not authenticated. Use /login or set CODEX_API_KEY.");
+  }
   console.log(`Workspace: ${config.workspace}`);
   if (config.codexModel) {
     console.log(`Default model: ${config.codexModel}`);

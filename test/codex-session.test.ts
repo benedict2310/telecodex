@@ -105,6 +105,7 @@ describe("CodexSessionService", () => {
     codexSandboxMode: "workspace-write",
     codexApprovalPolicy: "never",
     toolVerbosity: "summary",
+    enableTelegramLogin: true,
     ...overrides,
   });
 
