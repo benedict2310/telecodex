@@ -10,7 +10,7 @@ TeleCodex is a Telegram bridge for the OpenAI Codex CLI SDK. It keeps a Codex th
 - **Voice transcription** — send a voice message or audio file; TeleCodex transcribes it (local parakeet-coreml or OpenAI Whisper) and forwards the text to Codex
 - **Image input** — send a photo (with optional caption) to pass screenshots or images directly to Codex
 - **Session browser** — `/sessions` lists recent threads from `~/.codex`, grouped by workspace; tap to switch or use `/switch <thread-id>` directly
-- **Model picker** — `/model` shows available models; `/newmodel` starts a fresh thread with a chosen model
+- **Model picker** — `/model` shows available models and lets you switch for new threads
 - **Reasoning effort** — `/effort` lets you dial from `minimal` to `xhigh` for new threads
 - **Token usage** — turn and session token counts shown in the final message and on `/session`
 - **Handback flow** — `/handback` prints a ready-to-run `codex resume <id>` command (copied to clipboard on macOS)
@@ -63,7 +63,6 @@ TeleCodex is a Telegram bridge for the OpenAI Codex CLI SDK. It keeps a Codex th
 |---|---|
 | `/start` | Welcome message, current thread info, and voice/image status |
 | `/new` | Start a fresh thread (shows workspace picker if multiple workspaces known) |
-| `/newmodel` | Start a fresh thread with model selection |
 | `/abort` | Cancel the current turn |
 | `/session` | Thread ID, workspace, model, reasoning effort, and session token totals |
 | `/sessions` | Browse recent threads grouped by workspace; tap to switch |

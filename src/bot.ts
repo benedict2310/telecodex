@@ -88,7 +88,6 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
   const pendingSessionButtons = new Map<TelegramChatId, KeyboardItem[]>();
   const pendingWorkspaceButtons = new Map<TelegramChatId, KeyboardItem[]>();
   const pendingModelButtons = new Map<TelegramChatId, KeyboardItem[]>();
-  const pendingNewModelButtons = new Map<TelegramChatId, KeyboardItem[]>();
   const pendingEffortButtons = new Map<TelegramChatId, KeyboardItem[]>();
 
   const isBusy = (): boolean => isProcessing || isSwitching || isTranscribing || codexSession.isProcessing();
@@ -674,40 +673,6 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
     });
   });
 
-  bot.command("newmodel", async (ctx) => {
-    const chatId = ctx.chat?.id;
-    if (!chatId) {
-      return;
-    }
-
-    if (isBusy()) {
-      await safeReply(ctx, escapeHTML("Cannot create a new thread while a prompt is running."), {
-        fallbackText: "Cannot create a new thread while a prompt is running.",
-      });
-      return;
-    }
-
-    const models = codexSession.listModels();
-    if (models.length === 0) {
-      await safeReply(ctx, escapeHTML("No models available."), {
-        fallbackText: "No models available.",
-      });
-      return;
-    }
-
-    const modelButtons = models.map((model) => ({
-      label: model.displayName,
-      callbackData: `newmodel_${model.slug}`,
-    }));
-    pendingNewModelButtons.set(chatId, modelButtons);
-    const keyboard = paginateKeyboard(modelButtons, 0, "newmodel");
-
-    await safeReply(ctx, "<b>Select a model for a new thread:</b>", {
-      fallbackText: "Select a model for a new thread:",
-      replyMarkup: keyboard,
-    });
-  });
-
   bot.command("abort", async (ctx) => {
     try {
       await codexSession.abort();
@@ -864,32 +829,9 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
     }
 
     const orderedSessions: typeof sessions = [];
-    const plainGroups: string[] = [];
-    const htmlGroups: string[] = [];
 
-    for (const [workspace, workspaceSessions] of groupedSessions.entries()) {
-      const workspaceName = getWorkspaceShortName(workspace);
-      const plainGroupLines = [`📁 ${workspaceName}`];
-      const htmlGroupLines = [`📁 <b>${escapeHTML(workspaceName)}</b>`];
-
-      for (const session of workspaceSessions) {
-        orderedSessions.push(session);
-        const index = orderedSessions.length;
-        const title = formatThreadTitle(session.title || session.firstUserMessage || "(untitled)");
-        const relative = formatRelativeTime(session.updatedAt);
-        const model = session.model ?? "default";
-
-        plainGroupLines.push(`  ${index}. ${title}`);
-        plainGroupLines.push(`  🤖 ${model} • ${relative}`);
-        plainGroupLines.push("");
-
-        htmlGroupLines.push(`  <b>${index}.</b> <code>${escapeHTML(title)}</code>`);
-        htmlGroupLines.push(`  🤖 <code>${escapeHTML(model)}</code> • ${escapeHTML(relative)}`);
-        htmlGroupLines.push("");
-      }
-
-      plainGroups.push(plainGroupLines.join("\n").trimEnd());
-      htmlGroups.push(htmlGroupLines.join("\n").trimEnd());
+    for (const workspaceSessions of groupedSessions.values()) {
+      orderedSessions.push(...workspaceSessions);
     }
 
     pendingSessionPicks.set(
@@ -898,25 +840,24 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
     );
 
     const activeThreadId = codexSession.getInfo().threadId;
-    const sessionButtons = orderedSessions.map((session, index) => ({
-      label: session.id === activeThreadId ? `Switch to ${index + 1} ← active` : `Switch to ${index + 1}`,
-      callbackData: `sess_${index}`,
-    }));
+    const sessionButtons = orderedSessions.map((session, index) => {
+      const workspaceName = trimLine(getWorkspaceShortName(session.cwd), 6) || "(unknown)";
+      const title = trimLine(session.title || session.firstUserMessage || "(untitled)", 20) || "(untitled)";
+      const relative = formatRelativeTime(session.updatedAt);
+      const prefix = session.id === activeThreadId ? "✅" : "📁";
+
+      return {
+        label: `${prefix} ${workspaceName} · ${title} · ${relative}`,
+        callbackData: `sess_${index}`,
+      };
+    });
     pendingSessionButtons.set(chatId, sessionButtons);
     const keyboard = paginateKeyboard(sessionButtons, 0, "sess");
 
-    await safeReply(
-      ctx,
-      [`<b>Available threads</b> <i>(${orderedSessions.length})</i>:`, "", htmlGroups.join("\n\n"), "", "Tap a button to switch."]
-        .join("\n")
-        .trim(),
-      {
-        fallbackText: [`Available threads (${orderedSessions.length}):`, "", plainGroups.join("\n\n"), "", "Tap a button to switch."]
-          .join("\n")
-          .trim(),
-        replyMarkup: keyboard,
-      },
-    );
+    await safeReply(ctx, `<b>Recent threads</b> (${orderedSessions.length}):\nTap to switch.`, {
+      fallbackText: `Recent threads (${orderedSessions.length}):\nTap to switch.`,
+      replyMarkup: keyboard,
+    });
   });
 
   bot.command("model", async (ctx) => {
@@ -989,7 +930,6 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
   handlePageCallback(/^sess_page_(\d+)$/, "sess", pendingSessionButtons, "Expired, run /sessions again");
   handlePageCallback(/^ws_page_(\d+)$/, "ws", pendingWorkspaceButtons, "Expired, run /new again");
   handlePageCallback(/^model_page_(\d+)$/, "model", pendingModelButtons, "Expired, run /model again");
-  handlePageCallback(/^newmodel_page_(\d+)$/, "newmodel", pendingNewModelButtons, "Expired, run /newmodel again");
   handlePageCallback(/^effort_page_(\d+)$/, "effort", pendingEffortButtons, "Expired, run /effort again");
 
   bot.callbackQuery("codex_abort", async (ctx) => {
@@ -1169,59 +1109,6 @@ export function createBot(config: TeleCodexConfig, codexSession: CodexSessionSer
     });
   });
 
-  bot.callbackQuery(/^newmodel_(.+)$/, async (ctx) => {
-    const chatId = ctx.chat?.id;
-    const messageId = ctx.callbackQuery.message?.message_id;
-    const slug = ctx.match?.[1];
-
-    if (!chatId || !slug) {
-      return;
-    }
-
-    const buttons = pendingNewModelButtons.get(chatId);
-    if (!buttons) {
-      await ctx.answerCallbackQuery({ text: "Expired, run /newmodel again" });
-      return;
-    }
-
-    const modelExists = buttons.some((button) => button.callbackData === `newmodel_${slug}`);
-    if (!modelExists) {
-      await ctx.answerCallbackQuery({ text: "Expired, run /newmodel again" });
-      return;
-    }
-
-    if (isBusy()) {
-      await ctx.answerCallbackQuery({ text: "Wait for the current prompt to finish" });
-      return;
-    }
-
-    await ctx.answerCallbackQuery({ text: "Creating thread..." });
-    pendingNewModelButtons.delete(chatId);
-
-    isSwitching = true;
-    try {
-      const info = await codexSession.newThread(undefined, slug);
-      const plainText = `New thread created.\n\n${renderSessionInfoPlain(info)}`;
-      const html = `<b>New thread created.</b>\n\n${renderSessionInfoHTML(info)}`;
-
-      if (messageId) {
-        await safeEditMessage(bot, chatId, messageId, html, { fallbackText: plainText });
-      } else {
-        await safeReply(ctx, html, { fallbackText: plainText });
-      }
-    } catch (error) {
-      const errHtml = `<b>Failed:</b> ${escapeHTML(formatError(error))}`;
-      const errPlain = `Failed: ${formatError(error)}`;
-      if (messageId) {
-        await safeEditMessage(bot, chatId, messageId, errHtml, { fallbackText: errPlain });
-      } else {
-        await safeReply(ctx, errHtml, { fallbackText: errPlain });
-      }
-    } finally {
-      isSwitching = false;
-    }
-  });
-
   bot.on("message:text", async (ctx) => {
     const userText = ctx.message.text.trim();
     if (!userText || userText.startsWith("/")) {
@@ -1343,7 +1230,6 @@ export async function registerCommands(bot: Bot<Context>): Promise<void> {
   await bot.api.setMyCommands([
     { command: "start", description: "Welcome and thread info" },
     { command: "new", description: "Start a new thread" },
-    { command: "newmodel", description: "Start a new thread with model selection" },
     { command: "handback", description: "Hand thread back to Codex CLI" },
     { command: "abort", description: "Cancel current operation" },
     { command: "session", description: "Current thread details" },
@@ -1679,10 +1565,6 @@ function formatVoiceStatus(backends: string[]): string {
   return backends.length > 0 ? backends.join(" + ") : "not available";
 }
 
-function formatThreadTitle(title: string): string {
-  return trimLine(title.replace(/\s+/g, " ").trim(), 40) || "(untitled)";
-}
-
 function trimLine(text: string, maxLength: number): string {
   const singleLine = text.replace(/\s+/g, " ").trim();
   if (singleLine.length <= maxLength) {
@@ -1706,21 +1588,21 @@ function formatRelativeTime(date: Date): string {
 
   const deltaMinutes = Math.floor(deltaSeconds / 60);
   if (deltaMinutes < 60) {
-    return `${deltaMinutes} min ago`;
+    return `${deltaMinutes}m ago`;
   }
 
   const deltaHours = Math.floor(deltaMinutes / 60);
   if (deltaHours < 48) {
-    return `${deltaHours} hr ago`;
+    return `${deltaHours}h ago`;
   }
 
   const deltaDays = Math.floor(deltaHours / 24);
   if (deltaDays < 14) {
-    return `${deltaDays} day${deltaDays === 1 ? "" : "s"} ago`;
+    return `${deltaDays}d ago`;
   }
 
   const deltaWeeks = Math.floor(deltaDays / 7);
-  return `${deltaWeeks} week${deltaWeeks === 1 ? "" : "s"} ago`;
+  return `${deltaWeeks}w ago`;
 }
 
 function isMessageNotModifiedError(error: unknown): boolean {
