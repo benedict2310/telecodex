@@ -7,9 +7,24 @@ dist/
 # Environment / secrets
 .env
 
+# Runtime state
+.telecodex/
+telecodex.log
+
 # Runtime workspace (Docker mount)
 workspace/
 
+# Agent tooling (local dev only)
+agent-tools/
+
 # macOS
 .DS_Store
-telecodex.log
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Test coverage
+coverage/

@@ -1,8 +1,21 @@
 {
   "name": "telecodex",
   "version": "0.1.0",
-  "private": true,
   "description": "Telegram bridge for the OpenAI Codex CLI SDK",
+  "license": "MIT",
+  "author": "Benedict Evert",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/benedict2310/telecodex"
+  },
+  "keywords": [
+    "telegram",
+    "codex",
+    "openai",
+    "bot",
+    "cli",
+    "bridge"
+  ],
   "type": "module",
   "scripts": {
     "dev": "tsx src/index.ts",
