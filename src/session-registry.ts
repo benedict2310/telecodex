@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
+import { findLaunchProfile } from "./codex-launch.js";
 import { CodexSessionService } from "./codex-session.js";
 import type { TeleCodexConfig } from "./config.js";
 import type { TelegramContextKey } from "./context-key.js";
@@ -11,6 +12,7 @@ export interface ContextMetadata {
   workspace: string;
   model?: string;
   reasoningEffort?: string;
+  launchProfileId?: string;
   updatedAt: number;
 }
 
@@ -25,17 +27,23 @@ export class SessionRegistry {
     this.loadPersistedMetadata();
   }
 
-  async getOrCreate(contextKey: TelegramContextKey): Promise<CodexSessionService> {
+  async getOrCreate(
+    contextKey: TelegramContextKey,
+    options?: { deferThreadStart?: boolean },
+  ): Promise<CodexSessionService> {
     let session = this.sessions.get(contextKey);
     if (session) {
       return session;
     }
 
     const meta = this.metadata.get(contextKey);
+    const launchProfileId = resolveLaunchProfileId(this.config, meta);
     session = await CodexSessionService.create(this.config, {
       workspace: meta?.workspace,
       model: meta?.model,
       reasoningEffort: meta?.reasoningEffort,
+      launchProfileId,
+      deferThreadStart: options?.deferThreadStart && !meta?.threadId,
       resumeThreadId: meta?.threadId ?? undefined,
     });
 
@@ -63,6 +71,7 @@ export class SessionRegistry {
       workspace: info.workspace,
       model: info.model,
       reasoningEffort: info.reasoningEffort,
+      launchProfileId: info.nextLaunchProfileId ?? info.launchProfileId,
       updatedAt: Date.now(),
     });
     this.persistMetadata();
@@ -124,4 +133,22 @@ export class SessionRegistry {
       // Silently ignore load errors.
     }
   }
+}
+
+function resolveLaunchProfileId(
+  config: TeleCodexConfig,
+  meta: ContextMetadata | undefined,
+): string | undefined {
+  if (!meta?.launchProfileId) {
+    return undefined;
+  }
+
+  if (findLaunchProfile(config.launchProfiles, meta.launchProfileId)) {
+    return meta.launchProfileId;
+  }
+
+  console.warn(
+    `Unknown persisted launch profile "${meta.launchProfileId}" for ${meta.contextKey}. Falling back to ${config.defaultLaunchProfileId}.`,
+  );
+  return undefined;
 }

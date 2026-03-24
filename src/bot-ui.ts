@@ -25,6 +25,7 @@ export function renderHelpMessage(): DualText {
     {
       title: "🤖 Model",
       commands: [
+        ["/launch", "Select launch profile"],
         ["/model", "View & change model"],
         ["/effort", "Set reasoning effort"],
       ],

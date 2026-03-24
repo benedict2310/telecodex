@@ -1,9 +1,18 @@
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 
+import {
+  createDefaultLaunchProfile,
+  findLaunchProfile,
+  isCodexApprovalPolicy,
+  isCodexSandboxMode,
+  parseLaunchProfilesJson,
+  type CodexApprovalPolicy,
+  type CodexLaunchProfile,
+  type CodexSandboxMode,
+} from "./codex-launch.js";
+
 export type ToolVerbosity = "all" | "summary" | "errors-only" | "none";
-export type CodexSandboxMode = "read-only" | "workspace-write" | "danger-full-access";
-export type CodexApprovalPolicy = "never" | "on-request" | "on-failure" | "untrusted";
 
 export interface TeleCodexConfig {
   telegramBotToken: string;
@@ -15,6 +24,9 @@ export interface TeleCodexConfig {
   codexModel?: string;
   codexSandboxMode: CodexSandboxMode;
   codexApprovalPolicy: CodexApprovalPolicy;
+  launchProfiles: CodexLaunchProfile[];
+  defaultLaunchProfileId: string;
+  enableUnsafeLaunchProfiles: boolean;
   toolVerbosity: ToolVerbosity;
   enableTelegramLogin: boolean;
 }
@@ -30,6 +42,20 @@ export function loadConfig(): TeleCodexConfig {
   const codexModel = optionalString(process.env.CODEX_MODEL);
   const codexSandboxMode = parseSandboxMode(optionalString(process.env.CODEX_SANDBOX_MODE));
   const codexApprovalPolicy = parseApprovalPolicy(optionalString(process.env.CODEX_APPROVAL_POLICY));
+  const enableUnsafeLaunchProfiles = parseBooleanEnv(
+    optionalString(process.env.ENABLE_UNSAFE_LAUNCH_PROFILES),
+    false,
+  );
+  const launchProfiles = parseLaunchProfiles(
+    optionalString(process.env.CODEX_LAUNCH_PROFILES_JSON),
+    codexSandboxMode,
+    codexApprovalPolicy,
+    enableUnsafeLaunchProfiles,
+  );
+  const defaultLaunchProfileId = parseDefaultLaunchProfileId(
+    optionalString(process.env.CODEX_DEFAULT_LAUNCH_PROFILE),
+    launchProfiles,
+  );
   const toolVerbosity = parseToolVerbosity(optionalString(process.env.TOOL_VERBOSITY));
   const enableTelegramLogin = parseBooleanEnv(optionalString(process.env.ENABLE_TELEGRAM_LOGIN), true);
 
@@ -43,6 +69,9 @@ export function loadConfig(): TeleCodexConfig {
     codexModel,
     codexSandboxMode,
     codexApprovalPolicy,
+    launchProfiles,
+    defaultLaunchProfileId,
+    enableUnsafeLaunchProfiles,
     toolVerbosity,
     enableTelegramLogin,
   };
@@ -169,17 +198,14 @@ function parseSandboxMode(raw: string | undefined): CodexSandboxMode {
     return "workspace-write";
   }
 
-  switch (raw) {
-    case "read-only":
-    case "workspace-write":
-    case "danger-full-access":
-      return raw;
-    default:
-      console.warn(
-        `Invalid CODEX_SANDBOX_MODE value: "${raw}". Expected one of: read-only, workspace-write, danger-full-access. Falling back to "workspace-write".`,
-      );
-      return "workspace-write";
+  if (!isCodexSandboxMode(raw)) {
+    console.warn(
+      `Invalid CODEX_SANDBOX_MODE value: "${raw}". Expected one of: read-only, workspace-write, danger-full-access. Falling back to "workspace-write".`,
+    );
+    return "workspace-write";
   }
+
+  return raw;
 }
 
 function parseApprovalPolicy(raw: string | undefined): CodexApprovalPolicy {
@@ -187,18 +213,14 @@ function parseApprovalPolicy(raw: string | undefined): CodexApprovalPolicy {
     return "never";
   }
 
-  switch (raw) {
-    case "never":
-    case "on-request":
-    case "on-failure":
-    case "untrusted":
-      return raw;
-    default:
-      console.warn(
-        `Invalid CODEX_APPROVAL_POLICY value: "${raw}". Expected one of: never, on-request, on-failure, untrusted. Falling back to "never".`,
-      );
-      return "never";
+  if (!isCodexApprovalPolicy(raw)) {
+    console.warn(
+      `Invalid CODEX_APPROVAL_POLICY value: "${raw}". Expected one of: never, on-request, on-failure, untrusted. Falling back to "never".`,
+    );
+    return "never";
   }
+
+  return raw;
 }
 
 function parseToolVerbosity(raw: string | undefined): ToolVerbosity {
@@ -218,4 +240,51 @@ function parseToolVerbosity(raw: string | undefined): ToolVerbosity {
       );
       return "summary";
   }
+}
+
+function parseLaunchProfiles(
+  raw: string | undefined,
+  codexSandboxMode: CodexSandboxMode,
+  codexApprovalPolicy: CodexApprovalPolicy,
+  enableUnsafeLaunchProfiles: boolean,
+): CodexLaunchProfile[] {
+  const profiles = [createDefaultLaunchProfile(codexSandboxMode, codexApprovalPolicy)];
+
+  if (!raw) {
+    return profiles;
+  }
+
+  const parsedProfiles = parseLaunchProfilesJson(raw);
+  const seenIds = new Set(profiles.map((profile) => profile.id));
+
+  for (const profile of parsedProfiles) {
+    if (seenIds.has(profile.id)) {
+      throw new Error(`Duplicate launch profile id: ${profile.id}`);
+    }
+    if (profile.unsafe && !enableUnsafeLaunchProfiles) {
+      throw new Error(
+        `Unsafe launch profile "${profile.id}" requires ENABLE_UNSAFE_LAUNCH_PROFILES=true`,
+      );
+    }
+    profiles.push(profile);
+    seenIds.add(profile.id);
+  }
+
+  return profiles;
+}
+
+function parseDefaultLaunchProfileId(
+  raw: string | undefined,
+  launchProfiles: CodexLaunchProfile[],
+): string {
+  if (!raw) {
+    return launchProfiles[0]!.id;
+  }
+
+  const profile = findLaunchProfile(launchProfiles, raw);
+  if (!profile) {
+    throw new Error(`Unknown CODEX_DEFAULT_LAUNCH_PROFILE: ${raw}`);
+  }
+
+  return profile.id;
 }

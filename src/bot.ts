@@ -28,6 +28,11 @@ import {
   type CodexSessionService,
 } from "./codex-session.js";
 import { checkAuthStatus, clearAuthCache, startLogin, startLogout } from "./codex-auth.js";
+import {
+  findLaunchProfile,
+  formatLaunchProfileBehavior,
+  formatLaunchProfileLabel,
+} from "./codex-launch.js";
 import { getThread } from "./codex-state.js";
 import type { TeleCodexConfig, ToolVerbosity } from "./config.js";
 import { contextKeyFromCtx, isTopicContextKey, parseContextKey, type TelegramContextKey } from "./context-key.js";
@@ -113,12 +118,18 @@ export function createBot(config: TeleCodexConfig, registry: SessionRegistry): B
   const pendingWorkspacePicks = new Map<TelegramContextKey, string[]>();
   const pendingSessionButtons = new Map<TelegramContextKey, KeyboardItem[]>();
   const pendingWorkspaceButtons = new Map<TelegramContextKey, KeyboardItem[]>();
+  const pendingLaunchPicks = new Map<TelegramContextKey, string[]>();
+  const pendingLaunchButtons = new Map<TelegramContextKey, KeyboardItem[]>();
+  const pendingUnsafeLaunchConfirmations = new Map<TelegramContextKey, string>();
   const pendingModelButtons = new Map<TelegramContextKey, KeyboardItem[]>();
   const pendingEffortButtons = new Map<TelegramContextKey, KeyboardItem[]>();
   const lastPromptInput = new Map<TelegramContextKey, CodexPromptInput>();
 
   registry.onRemove((key) => {
     contextBusy.delete(key);
+    pendingLaunchPicks.delete(key);
+    pendingLaunchButtons.delete(key);
+    pendingUnsafeLaunchConfirmations.delete(key);
     lastPromptInput.delete(key);
   });
 
@@ -141,13 +152,14 @@ export function createBot(config: TeleCodexConfig, registry: SessionRegistry): B
 
   const getContextSession = async (
     ctx: Context,
+    options?: { deferThreadStart?: boolean },
   ): Promise<{ contextKey: TelegramContextKey; session: CodexSessionService } | null> => {
     const contextKey = contextKeyFromCtx(ctx);
     if (!contextKey) {
       return null;
     }
 
-    const session = await registry.getOrCreate(contextKey);
+    const session = await registry.getOrCreate(contextKey, options);
     return { contextKey, session };
   };
 
@@ -156,6 +168,12 @@ export function createBot(config: TeleCodexConfig, registry: SessionRegistry): B
   };
 
   const isTopicContext = (contextKey: TelegramContextKey): boolean => isTopicContextKey(contextKey);
+
+  const clearLaunchSelectionState = (contextKey: TelegramContextKey): void => {
+    pendingLaunchPicks.delete(contextKey);
+    pendingLaunchButtons.delete(contextKey);
+    pendingUnsafeLaunchConfirmations.delete(contextKey);
+  };
 
   const handlePageCallback = (
     pattern: RegExp,
@@ -750,7 +768,7 @@ export function createBot(config: TeleCodexConfig, registry: SessionRegistry): B
   });
 
   bot.command("start", async (ctx) => {
-    const contextSession = await getContextSession(ctx);
+    const contextSession = await getContextSession(ctx, { deferThreadStart: true });
     if (!contextSession) {
       return;
     }
@@ -771,7 +789,10 @@ export function createBot(config: TeleCodexConfig, registry: SessionRegistry): B
       await safeReply(ctx, welcome.html, { fallbackText: welcome.plain });
     } else {
       const welcome = renderWelcomeFirstTime(authWarning);
-      await safeReply(ctx, welcome.html, { fallbackText: welcome.plain });
+      const info = session.getInfo();
+      await safeReply(ctx, [welcome.html, "", renderLaunchSummaryHTML(info)].join("\n"), {
+        fallbackText: [welcome.plain, "", renderLaunchSummaryPlain(info)].join("\n"),
+      });
     }
   });
 
@@ -946,7 +967,7 @@ export function createBot(config: TeleCodexConfig, registry: SessionRegistry): B
       return;
     }
 
-    const contextSession = await getContextSession(ctx);
+    const contextSession = await getContextSession(ctx, { deferThreadStart: true });
     if (!contextSession) {
       return;
     }
@@ -992,7 +1013,7 @@ export function createBot(config: TeleCodexConfig, registry: SessionRegistry): B
   });
 
   bot.command("abort", async (ctx) => {
-    const contextSession = await getContextSession(ctx);
+    const contextSession = await getContextSession(ctx, { deferThreadStart: true });
     if (!contextSession) {
       return;
     }
@@ -1011,7 +1032,7 @@ export function createBot(config: TeleCodexConfig, registry: SessionRegistry): B
   });
 
   bot.command("retry", async (ctx) => {
-    const contextSession = await getContextSession(ctx);
+    const contextSession = await getContextSession(ctx, { deferThreadStart: true });
     if (!contextSession) {
       return;
     }
@@ -1045,7 +1066,7 @@ export function createBot(config: TeleCodexConfig, registry: SessionRegistry): B
   });
 
   bot.command("session", async (ctx) => {
-    const contextSession = await getContextSession(ctx);
+    const contextSession = await getContextSession(ctx, { deferThreadStart: true });
     if (!contextSession) {
       return;
     }
@@ -1060,8 +1081,71 @@ export function createBot(config: TeleCodexConfig, registry: SessionRegistry): B
     await safeReply(ctx, htmlLines.join("\n"), { fallbackText: plainLines.join("\n") });
   });
 
+  bot.command("launch", async (ctx) => {
+    const chatId = ctx.chat?.id;
+    if (!chatId) {
+      return;
+    }
+
+    const contextSession = await getContextSession(ctx, { deferThreadStart: true });
+    if (!contextSession) {
+      return;
+    }
+
+    const { contextKey, session } = contextSession;
+    if (isBusy(contextKey)) {
+      await safeReply(ctx, escapeHTML("Cannot change launch profile while a prompt is running."), {
+        fallbackText: "Cannot change launch profile while a prompt is running.",
+      });
+      return;
+    }
+
+    const info = session.getInfo();
+    const selectedLaunchProfile = session.getSelectedLaunchProfile();
+    const launchButtons = config.launchProfiles.map((profile, index) => ({
+      label: formatLaunchProfileLabel(profile, profile.id === selectedLaunchProfile.id),
+      callbackData: `launch_${index}`,
+    }));
+
+    pendingLaunchPicks.set(
+      contextKey,
+      config.launchProfiles.map((profile) => profile.id),
+    );
+    pendingLaunchButtons.set(contextKey, launchButtons);
+    pendingUnsafeLaunchConfirmations.delete(contextKey);
+
+    const keyboard = paginateKeyboard(launchButtons, 0, "launch");
+    const htmlLines = [
+      `<b>Selected launch profile:</b> <code>${escapeHTML(selectedLaunchProfile.label)}</code>`,
+      `<b>Behavior:</b> <code>${escapeHTML(formatLaunchProfileBehavior(selectedLaunchProfile))}</code>`,
+      "",
+      "Select a profile for new or reattached threads:",
+    ];
+    const plainLines = [
+      `Selected launch profile: ${selectedLaunchProfile.label}`,
+      `Behavior: ${formatLaunchProfileBehavior(selectedLaunchProfile)}`,
+      "",
+      "Select a profile for new or reattached threads:",
+    ];
+
+    if (selectedLaunchProfile.unsafe) {
+      htmlLines.splice(2, 0, "⚠️ <i>Selected profile uses danger-full-access.</i>");
+      plainLines.splice(2, 0, "⚠️ Selected profile uses danger-full-access.");
+    }
+
+    if (info.nextLaunchProfileId) {
+      htmlLines.splice(2, 0, `<b>Active thread still uses:</b> <code>${escapeHTML(info.launchProfileLabel)}</code>`);
+      plainLines.splice(2, 0, `Active thread still uses: ${info.launchProfileLabel}`);
+    }
+
+    await safeReply(ctx, htmlLines.join("\n"), {
+      fallbackText: plainLines.join("\n"),
+      replyMarkup: keyboard,
+    });
+  });
+
   bot.command("handback", async (ctx) => {
-    const contextSession = await getContextSession(ctx);
+    const contextSession = await getContextSession(ctx, { deferThreadStart: true });
     if (!contextSession) {
       return;
     }
@@ -1152,7 +1236,7 @@ export function createBot(config: TeleCodexConfig, registry: SessionRegistry): B
   });
 
   bot.command("attach", async (ctx) => {
-    const contextSession = await getContextSession(ctx);
+    const contextSession = await getContextSession(ctx, { deferThreadStart: true });
     if (!contextSession) {
       return;
     }
@@ -1205,7 +1289,7 @@ export function createBot(config: TeleCodexConfig, registry: SessionRegistry): B
       return;
     }
 
-    const contextSession = await getContextSession(ctx);
+    const contextSession = await getContextSession(ctx, { deferThreadStart: true });
     if (!contextSession) {
       return;
     }
@@ -1297,7 +1381,7 @@ export function createBot(config: TeleCodexConfig, registry: SessionRegistry): B
       return;
     }
 
-    const contextSession = await getContextSession(ctx);
+    const contextSession = await getContextSession(ctx, { deferThreadStart: true });
     if (!contextSession) {
       return;
     }
@@ -1342,7 +1426,7 @@ export function createBot(config: TeleCodexConfig, registry: SessionRegistry): B
       return;
     }
 
-    const contextSession = await getContextSession(ctx);
+    const contextSession = await getContextSession(ctx, { deferThreadStart: true });
     if (!contextSession) {
       return;
     }
@@ -1370,6 +1454,7 @@ export function createBot(config: TeleCodexConfig, registry: SessionRegistry): B
   });
   handlePageCallback(/^sess_page_(\d+)$/, "sess", pendingSessionButtons, "Expired, run /sessions again");
   handlePageCallback(/^ws_page_(\d+)$/, "ws", pendingWorkspaceButtons, "Expired, run /new again");
+  handlePageCallback(/^launch_page_(\d+)$/, "launch", pendingLaunchButtons, "Expired, run /launch again");
   handlePageCallback(/^model_page_(\d+)$/, "model", pendingModelButtons, "Expired, run /model again");
   handlePageCallback(/^effort_page_(\d+)$/, "effort", pendingEffortButtons, "Expired, run /effort again");
 
@@ -1399,7 +1484,7 @@ export function createBot(config: TeleCodexConfig, registry: SessionRegistry): B
       return;
     }
 
-    const contextSession = await getContextSession(ctx);
+    const contextSession = await getContextSession(ctx, { deferThreadStart: true });
     if (!contextSession) {
       return;
     }
@@ -1456,7 +1541,7 @@ export function createBot(config: TeleCodexConfig, registry: SessionRegistry): B
       return;
     }
 
-    const contextSession = await getContextSession(ctx);
+    const contextSession = await getContextSession(ctx, { deferThreadStart: true });
     if (!contextSession) {
       return;
     }
@@ -1505,6 +1590,171 @@ export function createBot(config: TeleCodexConfig, registry: SessionRegistry): B
     }
   });
 
+  bot.callbackQuery(/^launch_(\d+)$/, async (ctx) => {
+    const chatId = ctx.chat?.id;
+    const messageId = ctx.callbackQuery.message?.message_id;
+    const index = Number.parseInt(ctx.match?.[1] ?? "", 10);
+
+    if (!chatId || Number.isNaN(index)) {
+      return;
+    }
+
+    const contextSession = await getContextSession(ctx, { deferThreadStart: true });
+    if (!contextSession) {
+      return;
+    }
+
+    const { contextKey, session } = contextSession;
+    const launchProfileIds = pendingLaunchPicks.get(contextKey);
+    const profileId = launchProfileIds?.[index];
+    if (!profileId) {
+      await ctx.answerCallbackQuery({ text: "Expired, run /launch again" });
+      return;
+    }
+
+    if (isBusy(contextKey)) {
+      await ctx.answerCallbackQuery({ text: "Wait for the current prompt to finish" });
+      return;
+    }
+
+    const profile = findLaunchProfile(config.launchProfiles, profileId);
+    if (!profile) {
+      clearLaunchSelectionState(contextKey);
+      await ctx.answerCallbackQuery({ text: "Launch profile no longer exists" });
+      return;
+    }
+
+    if (profile.unsafe) {
+      pendingUnsafeLaunchConfirmations.set(contextKey, profile.id);
+      pendingLaunchPicks.delete(contextKey);
+      pendingLaunchButtons.delete(contextKey);
+
+      await ctx.answerCallbackQuery({ text: "Confirm danger-full-access" });
+      const confirmKeyboard = new InlineKeyboard()
+        .text("Enable danger-full-access", `launchconfirm_yes:${profile.id}`)
+        .row()
+        .text("Cancel", `launchconfirm_no:${profile.id}`);
+      const html = [
+        `<b>Confirm launch profile:</b> <code>${escapeHTML(profile.label)}</code>`,
+        `<b>Behavior:</b> <code>${escapeHTML(formatLaunchProfileBehavior(profile))}</code>`,
+        "",
+        "⚠️ <b>This profile uses danger-full-access.</b>",
+        "It will apply to new or reattached threads in this Telegram context.",
+      ].join("\n");
+      const plain = [
+        `Confirm launch profile: ${profile.label}`,
+        `Behavior: ${formatLaunchProfileBehavior(profile)}`,
+        "",
+        "WARNING: This profile uses danger-full-access.",
+        "It will apply to new or reattached threads in this Telegram context.",
+      ].join("\n");
+
+      if (messageId) {
+        await safeEditMessage(bot, chatId, messageId, html, {
+          fallbackText: plain,
+          replyMarkup: confirmKeyboard,
+        });
+      } else {
+        await safeReply(ctx, html, {
+          fallbackText: plain,
+          replyMarkup: confirmKeyboard,
+        });
+      }
+      return;
+    }
+
+    await ctx.answerCallbackQuery({ text: `Launch set to ${profile.label}` });
+    clearLaunchSelectionState(contextKey);
+    const selectedProfile = session.setLaunchProfile(profile.id);
+    updateSessionMetadata(contextKey, session);
+
+    const html = [
+      `<b>Launch profile set to</b> <code>${escapeHTML(selectedProfile.label)}</code>`,
+      `<b>Behavior:</b> <code>${escapeHTML(formatLaunchProfileBehavior(selectedProfile))}</code>`,
+      "",
+      "Applies to new or reattached threads.",
+    ].join("\n");
+    const plain = [
+      `Launch profile set to ${selectedProfile.label}`,
+      `Behavior: ${formatLaunchProfileBehavior(selectedProfile)}`,
+      "",
+      "Applies to new or reattached threads.",
+    ].join("\n");
+
+    if (messageId) {
+      await safeEditMessage(bot, chatId, messageId, html, { fallbackText: plain });
+    } else {
+      await safeReply(ctx, html, { fallbackText: plain });
+    }
+  });
+
+  bot.callbackQuery(/^launchconfirm_(yes|no):([a-z0-9_-]+)$/, async (ctx) => {
+    const chatId = ctx.chat?.id;
+    const messageId = ctx.callbackQuery.message?.message_id;
+    const action = ctx.match?.[1];
+    const confirmedProfileId = ctx.match?.[2];
+
+    if (!chatId || !messageId || !action || !confirmedProfileId) {
+      return;
+    }
+
+    const contextSession = await getContextSession(ctx, { deferThreadStart: true });
+    if (!contextSession) {
+      return;
+    }
+
+    const { contextKey, session } = contextSession;
+    const profileId = pendingUnsafeLaunchConfirmations.get(contextKey);
+    if (!profileId || profileId !== confirmedProfileId) {
+      await ctx.answerCallbackQuery({ text: "Expired, run /launch again" });
+      return;
+    }
+
+    if (action === "no") {
+      clearLaunchSelectionState(contextKey);
+      await ctx.answerCallbackQuery({ text: "Cancelled" });
+      await safeEditMessage(bot, chatId, messageId, "<b>Launch change cancelled.</b>\n\nRun /launch again to pick another profile.", {
+        fallbackText: "Launch change cancelled.\n\nRun /launch again to pick another profile.",
+      });
+      return;
+    }
+
+    if (isBusy(contextKey)) {
+      await ctx.answerCallbackQuery({ text: "Wait for the current prompt to finish" });
+      return;
+    }
+
+    const profile = findLaunchProfile(config.launchProfiles, profileId);
+    if (!profile) {
+      clearLaunchSelectionState(contextKey);
+      await ctx.answerCallbackQuery({ text: "Launch profile no longer exists" });
+      await safeEditMessage(bot, chatId, messageId, "<b>Launch profile expired.</b>\n\nRun /launch again.", {
+        fallbackText: "Launch profile expired.\n\nRun /launch again.",
+      });
+      return;
+    }
+
+    clearLaunchSelectionState(contextKey);
+    const selectedProfile = session.setLaunchProfile(profile.id);
+    updateSessionMetadata(contextKey, session);
+    await ctx.answerCallbackQuery({ text: `Launch set to ${selectedProfile.label}` });
+
+    const html = [
+      `<b>Launch profile set to</b> <code>${escapeHTML(selectedProfile.label)}</code>`,
+      `<b>Behavior:</b> <code>${escapeHTML(formatLaunchProfileBehavior(selectedProfile))}</code>`,
+      "",
+      "⚠️ <i>danger-full-access confirmed for new or reattached threads.</i>",
+    ].join("\n");
+    const plain = [
+      `Launch profile set to ${selectedProfile.label}`,
+      `Behavior: ${formatLaunchProfileBehavior(selectedProfile)}`,
+      "",
+      "danger-full-access confirmed for new or reattached threads.",
+    ].join("\n");
+
+    await safeEditMessage(bot, chatId, messageId, html, { fallbackText: plain });
+  });
+
   bot.callbackQuery(/^model_(.+)$/, async (ctx) => {
     const chatId = ctx.chat?.id;
     const messageId = ctx.callbackQuery.message?.message_id;
@@ -1514,7 +1764,7 @@ export function createBot(config: TeleCodexConfig, registry: SessionRegistry): B
       return;
     }
 
-    const contextSession = await getContextSession(ctx);
+    const contextSession = await getContextSession(ctx, { deferThreadStart: true });
     if (!contextSession) {
       return;
     }
@@ -1571,7 +1821,7 @@ export function createBot(config: TeleCodexConfig, registry: SessionRegistry): B
       return;
     }
 
-    const contextSession = await getContextSession(ctx);
+    const contextSession = await getContextSession(ctx, { deferThreadStart: true });
     if (!contextSession) {
       return;
     }
@@ -1860,6 +2110,7 @@ export async function registerCommands(bot: Bot<Context>): Promise<void> {
     { command: "sessions", description: "Browse & switch threads" },
     { command: "retry", description: "Resend the last prompt" },
     { command: "abort", description: "Cancel current operation" },
+    { command: "launch", description: "Select launch profile" },
     { command: "model", description: "View & change model" },
     { command: "effort", description: "Set reasoning effort" },
     { command: "auth", description: "Check auth status" },
@@ -1876,6 +2127,10 @@ function renderSessionInfoPlain(info: CodexSessionInfo): string {
   return [
     `Thread ID: ${info.threadId ?? "(not started yet)"}`,
     `Workspace: ${info.workspace}`,
+    `Launch profile: ${info.launchProfileLabel} (${info.launchProfileBehavior})${info.unsafeLaunch ? " [unsafe]" : ""}`,
+    info.nextLaunchProfileId
+      ? `Next launch profile: ${info.nextLaunchProfileLabel} (${info.nextLaunchProfileBehavior})${info.nextUnsafeLaunch ? " [unsafe]" : ""}`
+      : undefined,
     info.model ? `Model: ${info.model}` : undefined,
     info.reasoningEffort ? `Reasoning effort: ${info.reasoningEffort}` : undefined,
     info.sessionTokens ? formatSessionTokensPlain(info.sessionTokens) : undefined,
@@ -1888,12 +2143,26 @@ function renderSessionInfoHTML(info: CodexSessionInfo): string {
   return [
     `<b>Thread ID:</b> <code>${escapeHTML(info.threadId ?? "(not started yet)")}</code>`,
     `<b>Workspace:</b> <code>${escapeHTML(info.workspace)}</code>`,
+    `<b>Launch profile:</b> <code>${escapeHTML(info.launchProfileLabel)}</code>`,
+    `<b>Launch behavior:</b> <code>${escapeHTML(info.launchProfileBehavior)}</code>${info.unsafeLaunch ? " ⚠️" : ""}`,
+    info.nextLaunchProfileId
+      ? `<b>Next launch profile:</b> <code>${escapeHTML(info.nextLaunchProfileLabel ?? "")}</code> <i>(${escapeHTML(info.nextLaunchProfileBehavior ?? "")})</i>${info.nextUnsafeLaunch ? " ⚠️" : ""}`
+      : undefined,
     info.model ? `<b>Model:</b> <code>${escapeHTML(info.model)}</code>` : undefined,
     info.reasoningEffort ? `<b>Reasoning effort:</b> <code>${escapeHTML(info.reasoningEffort)}</code>` : undefined,
     info.sessionTokens ? `<b>Session tokens:</b> <code>${escapeHTML(formatSessionTokensValue(info.sessionTokens))}</code>` : undefined,
   ]
     .filter((line): line is string => Boolean(line))
     .join("\n");
+}
+
+function renderLaunchSummaryPlain(info: CodexSessionInfo): string {
+  return `Launch: ${info.launchProfileLabel} (${info.launchProfileBehavior})${info.unsafeLaunch ? " [unsafe]" : ""}`;
+}
+
+function renderLaunchSummaryHTML(info: CodexSessionInfo): string {
+  const suffix = info.unsafeLaunch ? " ⚠️" : "";
+  return `<b>Launch:</b> <code>${escapeHTML(info.launchProfileLabel)}</code> <i>(${escapeHTML(info.launchProfileBehavior)})</i>${suffix}`;
 }
 
 function renderToolStartMessage(toolName: string): RenderedText {

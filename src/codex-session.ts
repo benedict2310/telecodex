@@ -18,6 +18,11 @@ import {
   type CodexModelRecord,
   type CodexThreadRecord,
 } from "./codex-state.js";
+import {
+  findLaunchProfile,
+  formatLaunchProfileBehavior,
+  type CodexLaunchProfile,
+} from "./codex-launch.js";
 
 export interface CodexSessionCallbacks {
   onTextDelta: (delta: string) => void;
@@ -38,6 +43,16 @@ export interface CodexSessionInfo {
   workspace: string;
   model?: string;
   reasoningEffort?: string;
+  launchProfileId: string;
+  launchProfileLabel: string;
+  launchProfileBehavior: string;
+  sandboxMode: string;
+  approvalPolicy: string;
+  unsafeLaunch: boolean;
+  nextLaunchProfileId?: string;
+  nextLaunchProfileLabel?: string;
+  nextLaunchProfileBehavior?: string;
+  nextUnsafeLaunch?: boolean;
   sessionTokens?: {
     input: number;
     cached: number;
@@ -49,30 +64,28 @@ export interface CreateOptions {
   workspace?: string;
   model?: string;
   reasoningEffort?: string;
+  launchProfileId?: string;
+  deferThreadStart?: boolean;
   resumeThreadId?: string;
 }
 
 export type CodexPromptInput = string | { text?: string; imagePaths?: string[]; stagedFileInstructions?: string };
 
 export class CodexSessionService {
-  private readonly codex: Codex;
+  private codex: Codex | null = null;
   private thread: Thread | null = null;
   private currentWorkspace: string;
   private abortController: AbortController | null = null;
   private currentThreadId: string | null = null;
   private currentModel: string | undefined;
   private currentReasoningEffort: ModelReasoningEffort | undefined;
+  private currentLaunchProfile: CodexLaunchProfile;
+  private activeThreadLaunchProfile: CodexLaunchProfile | null = null;
   private sessionTokens = { input: 0, cached: 0, output: 0 };
 
   private constructor(private readonly config: TeleCodexConfig) {
     this.currentWorkspace = config.workspace;
-    this.codex = new Codex({
-      apiKey: config.codexApiKey,
-      config: {
-        approval_policy: config.codexApprovalPolicy,
-      },
-      env: buildCodexEnv(config.codexApiKey),
-    });
+    this.currentLaunchProfile = getLaunchProfile(config, config.defaultLaunchProfileId);
   }
 
   static async create(config: TeleCodexConfig, options?: CreateOptions): Promise<CodexSessionService> {
@@ -80,9 +93,18 @@ export class CodexSessionService {
     service.currentWorkspace = options?.workspace ?? config.workspace;
     service.currentModel = options?.model ?? config.codexModel;
     service.currentReasoningEffort = options?.reasoningEffort as ModelReasoningEffort | undefined;
+    service.currentLaunchProfile = getLaunchProfile(
+      config,
+      options?.launchProfileId ?? config.defaultLaunchProfileId,
+    );
+    service.resetCodexClient();
 
     if (options?.resumeThreadId) {
       await service.resumeThread(options.resumeThreadId);
+      return service;
+    }
+
+    if (options?.deferThreadStart) {
       return service;
     }
 
@@ -91,14 +113,31 @@ export class CodexSessionService {
   }
 
   getInfo(): CodexSessionInfo {
+    const effectiveLaunchProfile = this.activeThreadLaunchProfile ?? this.currentLaunchProfile;
     const info: CodexSessionInfo = {
       threadId: this.thread?.id ?? this.currentThreadId,
       workspace: this.currentWorkspace,
       model: this.currentModel ?? this.config.codexModel,
+      launchProfileId: effectiveLaunchProfile.id,
+      launchProfileLabel: effectiveLaunchProfile.label,
+      launchProfileBehavior: formatLaunchProfileBehavior(effectiveLaunchProfile),
+      sandboxMode: effectiveLaunchProfile.sandboxMode,
+      approvalPolicy: effectiveLaunchProfile.approvalPolicy,
+      unsafeLaunch: effectiveLaunchProfile.unsafe,
     };
 
     if (this.currentReasoningEffort) {
       info.reasoningEffort = this.currentReasoningEffort;
+    }
+
+    if (
+      this.activeThreadLaunchProfile &&
+      this.activeThreadLaunchProfile.id !== this.currentLaunchProfile.id
+    ) {
+      info.nextLaunchProfileId = this.currentLaunchProfile.id;
+      info.nextLaunchProfileLabel = this.currentLaunchProfile.label;
+      info.nextLaunchProfileBehavior = formatLaunchProfileBehavior(this.currentLaunchProfile);
+      info.nextUnsafeLaunch = this.currentLaunchProfile.unsafe;
     }
 
     if (this.sessionTokens.input > 0 || this.sessionTokens.cached > 0 || this.sessionTokens.output > 0) {
@@ -259,7 +298,8 @@ export class CodexSessionService {
 
     const effectiveWorkspace = workspace ?? this.currentWorkspace;
     const effectiveModel = model ?? this.currentModel;
-    this.thread = this.codex.startThread(this.buildThreadOptions(effectiveWorkspace, effectiveModel));
+    this.thread = this.getCodex().startThread(this.buildThreadOptions(effectiveWorkspace, effectiveModel));
+    this.activeThreadLaunchProfile = this.currentLaunchProfile;
     this.currentWorkspace = effectiveWorkspace;
     this.currentThreadId = this.thread.id ?? null;
     if (model) {
@@ -271,7 +311,11 @@ export class CodexSessionService {
   async resumeThread(threadId: string): Promise<CodexSessionInfo> {
     this.ensureIdle("resume a thread");
 
-    this.thread = this.codex.resumeThread(threadId, this.buildThreadOptions(this.currentWorkspace, this.currentModel));
+    this.thread = this.getCodex().resumeThread(
+      threadId,
+      this.buildThreadOptions(this.currentWorkspace, this.currentModel),
+    );
+    this.activeThreadLaunchProfile = this.currentLaunchProfile;
     this.currentThreadId = threadId;
     return this.getInfo();
   }
@@ -283,7 +327,8 @@ export class CodexSessionService {
     const workspace = record?.cwd ?? this.currentWorkspace;
     const model = record?.model || undefined;
 
-    this.thread = this.codex.resumeThread(threadId, this.buildThreadOptions(workspace, model));
+    this.thread = this.getCodex().resumeThread(threadId, this.buildThreadOptions(workspace, model));
+    this.activeThreadLaunchProfile = this.currentLaunchProfile;
     this.currentWorkspace = workspace;
     this.currentThreadId = threadId;
     if (model) {
@@ -313,12 +358,23 @@ export class CodexSessionService {
     this.currentReasoningEffort = effort;
   }
 
+  setLaunchProfile(profileId: string): CodexLaunchProfile {
+    this.currentLaunchProfile = getLaunchProfile(this.config, profileId);
+    this.resetCodexClient();
+    return this.currentLaunchProfile;
+  }
+
+  getSelectedLaunchProfile(): CodexLaunchProfile {
+    return this.currentLaunchProfile;
+  }
+
   handback(): { threadId: string | null; workspace: string } {
     const info = { threadId: this.currentThreadId, workspace: this.currentWorkspace };
     this.abortController?.abort();
     this.abortController = null;
     this.thread = null;
     this.currentThreadId = null;
+    this.activeThreadLaunchProfile = null;
     return info;
   }
 
@@ -327,6 +383,7 @@ export class CodexSessionService {
     this.abortController = null;
     this.thread = null;
     this.currentThreadId = null;
+    this.activeThreadLaunchProfile = null;
   }
 
   private buildSdkInput(input: CodexPromptInput): Input {
@@ -371,9 +428,9 @@ export class CodexSessionService {
     const effectiveModel = model ?? this.currentModel ?? this.config.codexModel;
     const options = {
       model: effectiveModel,
-      sandboxMode: this.config.codexSandboxMode,
+      sandboxMode: this.currentLaunchProfile.sandboxMode,
       workingDirectory: workspace,
-      approvalPolicy: this.config.codexApprovalPolicy,
+      approvalPolicy: this.currentLaunchProfile.approvalPolicy,
       skipGitRepoCheck: true as const,
     };
 
@@ -398,6 +455,32 @@ export class CodexSessionService {
       this.currentThreadId = event.thread_id;
     }
   }
+
+  private getCodex(): Codex {
+    if (!this.codex) {
+      this.resetCodexClient();
+    }
+
+    return this.codex!;
+  }
+
+  private resetCodexClient(): void {
+    this.codex = new Codex({
+      apiKey: this.config.codexApiKey,
+      config: {
+        approval_policy: this.currentLaunchProfile.approvalPolicy,
+      },
+      env: buildCodexEnv(this.config.codexApiKey),
+    });
+  }
+}
+
+function getLaunchProfile(config: TeleCodexConfig, profileId: string): CodexLaunchProfile {
+  const profile = findLaunchProfile(config.launchProfiles, profileId);
+  if (!profile) {
+    throw new Error(`Unknown launch profile: ${profileId}`);
+  }
+  return profile;
 }
 
 function buildCodexEnv(apiKey?: string): Record<string, string> {

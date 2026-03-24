@@ -2,6 +2,7 @@ import path from "node:path";
 
 import { vi } from "vitest";
 
+import { createDefaultLaunchProfile, createLaunchProfile } from "../src/codex-launch.js";
 import type { TeleCodexConfig } from "../src/config.js";
 
 const mockFsState = vi.hoisted(() => {
@@ -24,7 +25,22 @@ const mockSessionState = vi.hoisted(() => {
     getInfo: ReturnType<typeof vi.fn>;
     dispose: ReturnType<typeof vi.fn>;
     isProcessing: ReturnType<typeof vi.fn>;
-    setInfo: (next: Partial<{ threadId: string | null; workspace: string; model?: string; reasoningEffort?: string }>) => void;
+    setInfo: (next: Partial<{
+      threadId: string | null;
+      workspace: string;
+      model?: string;
+      reasoningEffort?: string;
+      launchProfileId: string;
+      launchProfileLabel: string;
+      launchProfileBehavior: string;
+      sandboxMode: string;
+      approvalPolicy: string;
+      unsafeLaunch: boolean;
+      nextLaunchProfileId?: string;
+      nextLaunchProfileLabel?: string;
+      nextLaunchProfileBehavior?: string;
+      nextUnsafeLaunch?: boolean;
+    }>) => void;
   }> = [];
 
   const reset = () => {
@@ -80,6 +96,17 @@ describe("SessionRegistry", () => {
     codexModel: "o3",
     codexSandboxMode: "workspace-write",
     codexApprovalPolicy: "never",
+    launchProfiles: [
+      createDefaultLaunchProfile("workspace-write", "never"),
+      createLaunchProfile({
+        id: "readonly",
+        label: "Read Only",
+        sandboxMode: "read-only",
+        approvalPolicy: "never",
+      }),
+    ],
+    defaultLaunchProfileId: "default",
+    enableUnsafeLaunchProfiles: false,
     toolVerbosity: "summary",
     enableTelegramLogin: true,
     ...overrides,
@@ -90,6 +117,12 @@ describe("SessionRegistry", () => {
     workspace: string;
     model?: string;
     reasoningEffort?: string;
+    launchProfileId: string;
+    launchProfileLabel: string;
+    launchProfileBehavior: string;
+    sandboxMode: string;
+    approvalPolicy: string;
+    unsafeLaunch: boolean;
   }) => {
     let currentInfo = { ...info };
     const session = {
@@ -111,6 +144,7 @@ describe("SessionRegistry", () => {
       workspace?: string;
       model?: string;
       reasoningEffort?: string;
+      launchProfileId?: string;
       resumeThreadId?: string;
     }) =>
       createMockSession({
@@ -118,6 +152,12 @@ describe("SessionRegistry", () => {
         workspace: options?.workspace ?? config.workspace,
         model: options?.model ?? config.codexModel,
         reasoningEffort: options?.reasoningEffort,
+        launchProfileId: options?.launchProfileId ?? config.defaultLaunchProfileId,
+        launchProfileLabel: options?.launchProfileId === "readonly" ? "Read Only" : "Default",
+        launchProfileBehavior: options?.launchProfileId === "readonly" ? "read-only / never" : "workspace-write / never",
+        sandboxMode: options?.launchProfileId === "readonly" ? "read-only" : "workspace-write",
+        approvalPolicy: "never",
+        unsafeLaunch: false,
       }),
     );
   });
@@ -175,6 +215,7 @@ describe("SessionRegistry", () => {
           workspace: "/workspace/a",
           model: "o4-mini",
           reasoningEffort: "low",
+          launchProfileId: "readonly",
           updatedAt: 10,
         },
         {
@@ -183,6 +224,7 @@ describe("SessionRegistry", () => {
           workspace: "/workspace/b",
           model: "gpt-5.4",
           reasoningEffort: "high",
+          launchProfileId: "default",
           updatedAt: 20,
         },
       ]),
@@ -197,12 +239,14 @@ describe("SessionRegistry", () => {
       workspace: "/workspace/a",
       model: "o4-mini",
       reasoningEffort: "low",
+      launchProfileId: "readonly",
       resumeThreadId: "thread-a",
     });
     expect(mockSessionState.create).toHaveBeenNthCalledWith(2, createConfig(), {
       workspace: "/workspace/b",
       model: "gpt-5.4",
       reasoningEffort: "high",
+      launchProfileId: "default",
       resumeThreadId: "thread-b",
     });
     expect(first.getInfo()).toEqual({
@@ -210,13 +254,56 @@ describe("SessionRegistry", () => {
       workspace: "/workspace/a",
       model: "o4-mini",
       reasoningEffort: "low",
+      launchProfileId: "readonly",
+      launchProfileLabel: "Read Only",
+      launchProfileBehavior: "read-only / never",
+      sandboxMode: "read-only",
+      approvalPolicy: "never",
+      unsafeLaunch: false,
     });
     expect(second.getInfo()).toEqual({
       threadId: "thread-b",
       workspace: "/workspace/b",
       model: "gpt-5.4",
       reasoningEffort: "high",
+      launchProfileId: "default",
+      launchProfileLabel: "Default",
+      launchProfileBehavior: "workspace-write / never",
+      sandboxMode: "workspace-write",
+      approvalPolicy: "never",
+      unsafeLaunch: false,
     });
+  });
+
+  it("falls back to the default launch profile when persisted metadata references a missing profile", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const persistPath = path.join("/workspace/base", ".telecodex", "contexts.json");
+    mockFsState.files.set(
+      persistPath,
+      JSON.stringify([
+        {
+          contextKey: "123",
+          threadId: "thread-a",
+          workspace: "/workspace/a",
+          launchProfileId: "missing",
+          updatedAt: 10,
+        },
+      ]),
+    );
+
+    const registry = new SessionRegistry(createConfig());
+    await registry.getOrCreate("123");
+
+    expect(mockSessionState.create).toHaveBeenCalledWith(createConfig(), {
+      workspace: "/workspace/a",
+      model: undefined,
+      reasoningEffort: undefined,
+      launchProfileId: undefined,
+      resumeThreadId: "thread-a",
+    });
+    expect(warnSpy).toHaveBeenCalledWith(
+      'Unknown persisted launch profile "missing" for 123. Falling back to default.',
+    );
   });
 
   it("updates metadata and lists contexts sorted by newest first", async () => {
@@ -225,11 +312,32 @@ describe("SessionRegistry", () => {
     const second = (await registry.getOrCreate("123:42")) as any;
     const dateNowSpy = vi.spyOn(Date, "now");
 
-    first.setInfo({ threadId: "thread-a", workspace: "/workspace/a", model: "o4-mini" });
+    first.setInfo({
+      threadId: "thread-a",
+      workspace: "/workspace/a",
+      model: "o4-mini",
+      launchProfileId: "readonly",
+      launchProfileLabel: "Read Only",
+      launchProfileBehavior: "read-only / never",
+      sandboxMode: "read-only",
+      approvalPolicy: "never",
+      unsafeLaunch: false,
+    });
     dateNowSpy.mockReturnValueOnce(1000);
     registry.updateMetadata("123", first as any);
 
-    second.setInfo({ threadId: "thread-b", workspace: "/workspace/b", model: "gpt-5.4", reasoningEffort: "high" });
+    second.setInfo({
+      threadId: "thread-b",
+      workspace: "/workspace/b",
+      model: "gpt-5.4",
+      reasoningEffort: "high",
+      launchProfileId: "default",
+      launchProfileLabel: "Default",
+      launchProfileBehavior: "workspace-write / never",
+      sandboxMode: "workspace-write",
+      approvalPolicy: "never",
+      unsafeLaunch: false,
+    });
     dateNowSpy.mockReturnValueOnce(2000);
     registry.updateMetadata("123:42", second as any);
 
@@ -240,6 +348,7 @@ describe("SessionRegistry", () => {
         workspace: "/workspace/b",
         model: "gpt-5.4",
         reasoningEffort: "high",
+        launchProfileId: "default",
         updatedAt: 2000,
       },
       {
@@ -248,7 +357,41 @@ describe("SessionRegistry", () => {
         workspace: "/workspace/a",
         model: "o4-mini",
         reasoningEffort: undefined,
+        launchProfileId: "readonly",
         updatedAt: 1000,
+      },
+    ]);
+  });
+
+  it("persists the next selected launch profile when it differs from the active thread profile", async () => {
+    const registry = new SessionRegistry(createConfig());
+    const session = (await registry.getOrCreate("123")) as any;
+
+    session.setInfo({
+      threadId: "thread-a",
+      workspace: "/workspace/a",
+      launchProfileId: "default",
+      launchProfileLabel: "Default",
+      launchProfileBehavior: "workspace-write / never",
+      sandboxMode: "workspace-write",
+      approvalPolicy: "never",
+      unsafeLaunch: false,
+      nextLaunchProfileId: "readonly",
+      nextLaunchProfileLabel: "Read Only",
+      nextLaunchProfileBehavior: "read-only / never",
+      nextUnsafeLaunch: false,
+    });
+    registry.updateMetadata("123", session as any);
+
+    expect(registry.listContexts()).toEqual([
+      {
+        contextKey: "123",
+        threadId: "thread-a",
+        workspace: "/workspace/a",
+        model: "o3",
+        reasoningEffort: undefined,
+        launchProfileId: "readonly",
+        updatedAt: expect.any(Number),
       },
     ]);
   });
@@ -276,6 +419,12 @@ describe("SessionRegistry", () => {
       workspace: "/workspace/a",
       model: "o4-mini",
       reasoningEffort: "medium",
+      launchProfileId: "default",
+      launchProfileLabel: "Default",
+      launchProfileBehavior: "workspace-write / never",
+      sandboxMode: "workspace-write",
+      approvalPolicy: "never",
+      unsafeLaunch: false,
     });
     registry.updateMetadata("123", session as any);
 
@@ -289,6 +438,7 @@ describe("SessionRegistry", () => {
         workspace: "/workspace/a",
         model: "o4-mini",
         reasoningEffort: "medium",
+        launchProfileId: "default",
         updatedAt: expect.any(Number),
       },
     ]);

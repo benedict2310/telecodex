@@ -1,5 +1,6 @@
 import { vi } from "vitest";
 
+import { createDefaultLaunchProfile, createLaunchProfile } from "../src/codex-launch.js";
 import type { TeleCodexConfig } from "../src/config.js";
 
 const mockCodexState = vi.hoisted(() => {
@@ -104,6 +105,17 @@ describe("CodexSessionService", () => {
     codexModel: "o3",
     codexSandboxMode: "workspace-write",
     codexApprovalPolicy: "never",
+    launchProfiles: [
+      createDefaultLaunchProfile("workspace-write", "never"),
+      createLaunchProfile({
+        id: "readonly",
+        label: "Read Only",
+        sandboxMode: "read-only",
+        approvalPolicy: "never",
+      }),
+    ],
+    defaultLaunchProfileId: "default",
+    enableUnsafeLaunchProfiles: false,
     toolVerbosity: "summary",
     enableTelegramLogin: true,
     ...overrides,
@@ -155,14 +167,21 @@ describe("CodexSessionService", () => {
       threadId: null,
       workspace: "/workspace/base",
       model: "o3",
+      launchProfileId: "default",
+      launchProfileLabel: "Default",
+      launchProfileBehavior: "workspace-write / never",
+      sandboxMode: "workspace-write",
+      approvalPolicy: "never",
+      unsafeLaunch: false,
     });
   });
 
-  it("create accepts overrides for workspace, model, reasoning effort, and resumeThreadId", async () => {
+  it("create accepts overrides for workspace, model, reasoning effort, launch profile, and resumeThreadId", async () => {
     const service = await CodexSessionService.create(createConfig(), {
       workspace: "/workspace/resumed",
       model: "gpt-5.4",
       reasoningEffort: "high",
+      launchProfileId: "readonly",
       resumeThreadId: "thread-resume",
     });
 
@@ -170,7 +189,7 @@ describe("CodexSessionService", () => {
     expect(codexInstance.startThread).toHaveBeenCalledTimes(0);
     expect(codexInstance.resumeThread).toHaveBeenCalledWith("thread-resume", {
       model: "gpt-5.4",
-      sandboxMode: "workspace-write",
+      sandboxMode: "read-only",
       workingDirectory: "/workspace/resumed",
       approvalPolicy: "never",
       skipGitRepoCheck: true,
@@ -181,6 +200,73 @@ describe("CodexSessionService", () => {
       workspace: "/workspace/resumed",
       model: "gpt-5.4",
       reasoningEffort: "high",
+      launchProfileId: "readonly",
+      launchProfileLabel: "Read Only",
+      launchProfileBehavior: "read-only / never",
+      sandboxMode: "read-only",
+      approvalPolicy: "never",
+      unsafeLaunch: false,
+    });
+  });
+
+  it("can defer thread creation so launch settings apply before the first thread starts", async () => {
+    const service = await CodexSessionService.create(createConfig(), {
+      deferThreadStart: true,
+    });
+
+    expect(mockState.codexInstances[0].startThread).toHaveBeenCalledTimes(0);
+    expect(service.hasActiveThread()).toBe(false);
+
+    service.setLaunchProfile("readonly");
+    await service.newThread();
+
+    expect(mockState.createdThreads[0].options.sandboxMode).toBe("read-only");
+  });
+
+  it("setLaunchProfile applies to newly created threads without mutating the existing thread", async () => {
+    const service = await CodexSessionService.create(createConfig());
+    const firstThread = mockState.createdThreads[0];
+
+    const profile = service.setLaunchProfile("readonly");
+    expect(profile.label).toBe("Read Only");
+    expect(firstThread.options.sandboxMode).toBe("workspace-write");
+
+    await service.newThread();
+
+    const secondThread = mockState.createdThreads[1];
+    expect(secondThread.options.sandboxMode).toBe("read-only");
+    expect(service.getInfo()).toEqual({
+      threadId: null,
+      workspace: "/workspace/base",
+      model: "o3",
+      launchProfileId: "readonly",
+      launchProfileLabel: "Read Only",
+      launchProfileBehavior: "read-only / never",
+      sandboxMode: "read-only",
+      approvalPolicy: "never",
+      unsafeLaunch: false,
+    });
+  });
+
+  it("reports the active thread launch mode separately from the next selected launch profile", async () => {
+    const service = await CodexSessionService.create(createConfig());
+
+    service.setLaunchProfile("readonly");
+
+    expect(service.getInfo()).toEqual({
+      threadId: null,
+      workspace: "/workspace/base",
+      model: "o3",
+      launchProfileId: "default",
+      launchProfileLabel: "Default",
+      launchProfileBehavior: "workspace-write / never",
+      sandboxMode: "workspace-write",
+      approvalPolicy: "never",
+      unsafeLaunch: false,
+      nextLaunchProfileId: "readonly",
+      nextLaunchProfileLabel: "Read Only",
+      nextLaunchProfileBehavior: "read-only / never",
+      nextUnsafeLaunch: false,
     });
   });
 
@@ -603,6 +689,12 @@ describe("CodexSessionService", () => {
       threadId: null,
       workspace: "/workspace/other",
       model: "o3",
+      launchProfileId: "default",
+      launchProfileLabel: "Default",
+      launchProfileBehavior: "workspace-write / never",
+      sandboxMode: "workspace-write",
+      approvalPolicy: "never",
+      unsafeLaunch: false,
     });
     expect(service.getCurrentWorkspace()).toBe("/workspace/other");
   });
@@ -624,6 +716,12 @@ describe("CodexSessionService", () => {
       threadId: "thread-999",
       workspace: "/workspace/base",
       model: "o3",
+      launchProfileId: "default",
+      launchProfileLabel: "Default",
+      launchProfileBehavior: "workspace-write / never",
+      sandboxMode: "workspace-write",
+      approvalPolicy: "never",
+      unsafeLaunch: false,
     });
   });
 
@@ -655,6 +753,12 @@ describe("CodexSessionService", () => {
       threadId: "thread-abc",
       workspace: "/workspace/from-db",
       model: "gpt-5.4-mini",
+      launchProfileId: "default",
+      launchProfileLabel: "Default",
+      launchProfileBehavior: "workspace-write / never",
+      sandboxMode: "workspace-write",
+      approvalPolicy: "never",
+      unsafeLaunch: false,
     });
   });
 
@@ -817,6 +921,12 @@ describe("CodexSessionService", () => {
       threadId: null,
       workspace: "/workspace/base",
       model: "o3",
+      launchProfileId: "default",
+      launchProfileLabel: "Default",
+      launchProfileBehavior: "workspace-write / never",
+      sandboxMode: "workspace-write",
+      approvalPolicy: "never",
+      unsafeLaunch: false,
       sessionTokens: {
         input: 1,
         cached: 0,

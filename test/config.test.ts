@@ -19,6 +19,9 @@ describe("loadConfig", () => {
     delete process.env.CODEX_MODEL;
     delete process.env.CODEX_SANDBOX_MODE;
     delete process.env.CODEX_APPROVAL_POLICY;
+    delete process.env.CODEX_LAUNCH_PROFILES_JSON;
+    delete process.env.CODEX_DEFAULT_LAUNCH_PROFILE;
+    delete process.env.ENABLE_UNSAFE_LAUNCH_PROFILES;
     delete process.env.TOOL_VERBOSITY;
     delete process.env.MAX_FILE_SIZE;
     delete process.env.ENABLE_TELEGRAM_LOGIN;
@@ -67,6 +70,17 @@ describe("loadConfig", () => {
       codexModel: "o3",
       codexSandboxMode: "danger-full-access",
       codexApprovalPolicy: "on-request",
+      launchProfiles: [
+        {
+          id: "default",
+          label: "Default",
+          sandboxMode: "danger-full-access",
+          approvalPolicy: "on-request",
+          unsafe: true,
+        },
+      ],
+      defaultLaunchProfileId: "default",
+      enableUnsafeLaunchProfiles: false,
       toolVerbosity: "all",
       enableTelegramLogin: true,
     });
@@ -83,6 +97,17 @@ describe("loadConfig", () => {
     expect(config.maxFileSize).toBe(20 * 1024 * 1024);
     expect(config.codexSandboxMode).toBe("workspace-write");
     expect(config.codexApprovalPolicy).toBe("never");
+    expect(config.launchProfiles).toEqual([
+      {
+        id: "default",
+        label: "Default",
+        sandboxMode: "workspace-write",
+        approvalPolicy: "never",
+        unsafe: false,
+      },
+    ]);
+    expect(config.defaultLaunchProfileId).toBe("default");
+    expect(config.enableUnsafeLaunchProfiles).toBe(false);
     expect(config.toolVerbosity).toBe("summary");
     expect(config.enableTelegramLogin).toBe(true);
     expect(config.workspace).toBe(process.cwd());
@@ -128,6 +153,15 @@ describe("loadConfig", () => {
     expect(config.codexModel).toBe("gpt-4.1");
     expect(config.codexSandboxMode).toBe("read-only");
     expect(config.codexApprovalPolicy).toBe("on-failure");
+    expect(config.launchProfiles).toEqual([
+      {
+        id: "default",
+        label: "Default",
+        sandboxMode: "read-only",
+        approvalPolicy: "on-failure",
+        unsafe: false,
+      },
+    ]);
     expect(process.env.EXTRA_MULTILINE).toBe("hello\nworld");
   });
 
@@ -191,5 +225,108 @@ describe("loadConfig", () => {
     expect(config.toolVerbosity).toBe("summary");
     expect(config.maxFileSize).toBe(20 * 1024 * 1024);
     expect(warnSpy).toHaveBeenCalledTimes(4);
+  });
+
+  it("parses explicit launch profiles and default selection", () => {
+    process.env.TELEGRAM_BOT_TOKEN = "bot-token";
+    process.env.TELEGRAM_ALLOWED_USER_IDS = "123";
+    process.env.ENABLE_UNSAFE_LAUNCH_PROFILES = "true";
+    process.env.CODEX_LAUNCH_PROFILES_JSON = JSON.stringify([
+      {
+        id: "readonly",
+        label: "Read Only",
+        sandboxMode: "read-only",
+        approvalPolicy: "never",
+      },
+      {
+        id: "danger-full",
+        label: "Danger Full",
+        sandboxMode: "danger-full-access",
+        approvalPolicy: "never",
+      },
+    ]);
+    process.env.CODEX_DEFAULT_LAUNCH_PROFILE = "readonly";
+
+    const config = loadConfig();
+
+    expect(config.enableUnsafeLaunchProfiles).toBe(true);
+    expect(config.defaultLaunchProfileId).toBe("readonly");
+    expect(config.launchProfiles).toEqual([
+      {
+        id: "default",
+        label: "Default",
+        sandboxMode: "workspace-write",
+        approvalPolicy: "never",
+        unsafe: false,
+      },
+      {
+        id: "readonly",
+        label: "Read Only",
+        sandboxMode: "read-only",
+        approvalPolicy: "never",
+        unsafe: false,
+      },
+      {
+        id: "danger-full",
+        label: "Danger Full",
+        sandboxMode: "danger-full-access",
+        approvalPolicy: "never",
+        unsafe: true,
+      },
+    ]);
+  });
+
+  it("throws when CODEX_DEFAULT_LAUNCH_PROFILE is unknown", () => {
+    process.env.TELEGRAM_BOT_TOKEN = "bot-token";
+    process.env.TELEGRAM_ALLOWED_USER_IDS = "123";
+    process.env.CODEX_LAUNCH_PROFILES_JSON = JSON.stringify([
+      {
+        id: "readonly",
+        label: "Read Only",
+        sandboxMode: "read-only",
+        approvalPolicy: "never",
+      },
+    ]);
+    process.env.CODEX_DEFAULT_LAUNCH_PROFILE = "missing";
+
+    expect(() => loadConfig()).toThrow("Unknown CODEX_DEFAULT_LAUNCH_PROFILE: missing");
+  });
+
+  it("throws when unsafe extra launch profiles are configured without enabling them", () => {
+    process.env.TELEGRAM_BOT_TOKEN = "bot-token";
+    process.env.TELEGRAM_ALLOWED_USER_IDS = "123";
+    process.env.CODEX_LAUNCH_PROFILES_JSON = JSON.stringify([
+      {
+        id: "danger-full",
+        label: "Danger Full",
+        sandboxMode: "danger-full-access",
+        approvalPolicy: "never",
+      },
+    ]);
+
+    expect(() => loadConfig()).toThrow(
+      'Unsafe launch profile "danger-full" requires ENABLE_UNSAFE_LAUNCH_PROFILES=true',
+    );
+  });
+
+  it("throws on duplicate launch profile ids", () => {
+    process.env.TELEGRAM_BOT_TOKEN = "bot-token";
+    process.env.TELEGRAM_ALLOWED_USER_IDS = "123";
+    process.env.CODEX_LAUNCH_PROFILES_JSON = JSON.stringify([
+      {
+        id: "readonly",
+        label: "Read Only",
+        sandboxMode: "read-only",
+        approvalPolicy: "never",
+      },
+      {
+        id: "readonly",
+        label: "Read Only 2",
+        sandboxMode: "workspace-write",
+        approvalPolicy: "on-request",
+      },
+    ]);
+
+    expect(() => loadConfig()).toThrow("Duplicate launch profile id: readonly");
   });
 });

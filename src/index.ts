@@ -1,5 +1,6 @@
 import { createBot, registerCommands } from "./bot.js";
 import { checkAuthStatus } from "./codex-auth.js";
+import { findLaunchProfile, formatLaunchProfileBehavior } from "./codex-launch.js";
 import { loadConfig } from "./config.js";
 import { SessionRegistry } from "./session-registry.js";
 
@@ -21,6 +22,15 @@ try {
   console.log(`Workspace: ${config.workspace}`);
   if (config.codexModel) {
     console.log(`Default model: ${config.codexModel}`);
+  }
+  const defaultLaunchProfile = findLaunchProfile(config.launchProfiles, config.defaultLaunchProfileId);
+  if (defaultLaunchProfile) {
+    console.log(
+      `Default launch profile: ${defaultLaunchProfile.label} (${formatLaunchProfileBehavior(defaultLaunchProfile)})`,
+    );
+    if (defaultLaunchProfile.unsafe) {
+      console.warn("Warning: Default launch profile uses danger-full-access.");
+    }
   }
   console.log("Session mode: per Telegram context");
 } catch (error) {

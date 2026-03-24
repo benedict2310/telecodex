@@ -13,6 +13,7 @@ TeleCodex is a Telegram bridge for the OpenAI Codex CLI SDK. It keeps a Codex th
 - **File ingest & artifacts** — send a document to stage it for Codex; generated files are delivered back as Telegram documents
 - **Session browser** — `/sessions` lists recent threads from `~/.codex`, grouped by workspace; tap to switch
 - **Telegram login** — `/login` authenticates against the Codex CLI via device auth flow, no terminal needed
+- **Launch profiles** — `/launch` selects the sandbox + approval mode for new or reattached threads in the current Telegram context
 - **Model picker** — `/model` shows available models and lets you switch for new threads
 - **Reasoning effort** — `/effort` lets you dial from `minimal` to `xhigh` for new threads
 - **Message reactions** — 👀 while processing, 👍 on success; silently degrades in chats without reaction support
@@ -54,6 +55,9 @@ TeleCodex is a Telegram bridge for the OpenAI Codex CLI SDK. It keeps a Codex th
    | `CODEX_MODEL` | — | Default model, e.g. `gpt-5.4`, `o3` |
    | `CODEX_SANDBOX_MODE` | — | `read-only`, `workspace-write` *(default)*, `danger-full-access` |
    | `CODEX_APPROVAL_POLICY` | — | `never` *(default)*, `on-request`, `on-failure`, `untrusted` |
+   | `CODEX_LAUNCH_PROFILES_JSON` | — | Optional JSON array of named launch profiles for `/launch` |
+   | `CODEX_DEFAULT_LAUNCH_PROFILE` | — | Default launch profile id (defaults to `default`) |
+   | `ENABLE_UNSAFE_LAUNCH_PROFILES` | — | Set to `true` to allow extra `danger-full-access` launch profiles |
    | `TOOL_VERBOSITY` | — | `all`, `summary` *(default)*, `errors-only`, `none` |
    | `MAX_FILE_SIZE` | — | Max upload size in bytes (default `20971520` = 20 MB) |
    | `ENABLE_TELEGRAM_LOGIN` | — | Allow `/login` and `/logout` from Telegram (`true` by default) |
@@ -76,6 +80,7 @@ TeleCodex is a Telegram bridge for the OpenAI Codex CLI SDK. It keeps a Codex th
 | `/switch <id>` | Switch directly to a thread by ID |
 | `/retry` | Resend the last prompt |
 | `/abort` | Cancel the current turn |
+| `/launch` | Select launch profile for new or reattached threads |
 | `/model` | View and change the model |
 | `/effort` | Set reasoning effort: `minimal` · `low` · `medium` · `high` · `xhigh` |
 | `/auth` | Check authentication status |
@@ -99,6 +104,20 @@ TeleCodex is a Telegram bridge for the OpenAI Codex CLI SDK. It keeps a Codex th
 | `summary` *(default)* | A one-line count at the end: `🔧 3 tools used: shell ×2, file_change` |
 | `errors-only` | Only failed tool calls |
 | `none` | Silent |
+
+### Launch profiles
+
+- TeleCodex always provides a built-in `default` profile synthesized from `CODEX_SANDBOX_MODE` and `CODEX_APPROVAL_POLICY`
+- Optional extra profiles can be configured with `CODEX_LAUNCH_PROFILES_JSON`, for example:
+  ```json
+  [
+    { "id": "readonly", "label": "Read Only", "sandboxMode": "read-only", "approvalPolicy": "never" },
+    { "id": "review", "label": "Review", "sandboxMode": "workspace-write", "approvalPolicy": "on-request" }
+  ]
+  ```
+- `/launch` changes only future thread creation or reattachment in the current chat/topic context; it does not mutate an already active thread in place
+- Extra `danger-full-access` profiles are blocked unless `ENABLE_UNSAFE_LAUNCH_PROFILES=true`
+- Selecting a `danger-full-access` profile from Telegram requires an explicit confirmation step
 
 ## Multi-Session Architecture
 
@@ -125,7 +144,7 @@ The `SessionRegistry` maps context keys to `CodexSessionService` instances:
 - **`/sessions`** → lists all Codex threads from `~/.codex`, lets you switch within the current context
 - **`/attach <id>`** → resumes a specific Codex CLI thread (useful for picking up work started in the terminal)
 
-Session metadata (thread ID, workspace, model, effort) is persisted to `.telecodex/contexts.json` and restored on restart so threads survive bot reboots.
+Session metadata (thread ID, workspace, launch profile, model, effort) is persisted to `.telecodex/contexts.json` and restored on restart so threads survive bot reboots.
 
 Each context has independent busy-state tracking, so a running prompt in one topic doesn't block another.
 
@@ -169,6 +188,7 @@ TeleCodex/
 │   ├── index.ts           — startup, signal handling, polling loop
 │   ├── bot.ts             — Telegram bot, all commands and handlers
 │   ├── bot-ui.ts          — pure render helpers (/help, /start, session labels)
+│   ├── codex-launch.ts    — launch profile parsing, validation, and formatting
 │   ├── codex-session.ts   — CodexSessionService wrapping the SDK
 │   ├── codex-state.ts     — SQLite reader for thread/model discovery
 │   ├── codex-auth.ts      — Codex CLI auth (login status, device auth, logout)
@@ -180,7 +200,7 @@ TeleCodex/
 │   ├── voice.ts           — voice transcription (parakeet / Whisper)
 │   ├── config.ts          — environment loading and validation
 │   └── format.ts          — Markdown → Telegram HTML conversion
-├── test/                  — 14 test files, 180+ tests (vitest)
+├── test/                  — 15 test files, 180+ tests (vitest)
 ├── .env.example
 ├── Dockerfile
 ├── docker-compose.yml
@@ -213,7 +233,9 @@ npm test         # run vitest
 - Only users in `TELEGRAM_ALLOWED_USER_IDS` can interact with the bot
 - Default sandbox mode is `workspace-write` — Codex can read and write within the working directory
 - Use `danger-full-access` only if you fully trust the user and the host environment
+- Extra `danger-full-access` launch profiles are opt-in via `ENABLE_UNSAFE_LAUNCH_PROFILES=true`
 - Default approval policy is `never` — suited for headless/automated use
+- `/launch` only selects from validated configured profiles; Telegram users cannot submit arbitrary sandbox or approval values
 - `CODEX_API_KEY` (agent auth) and `OPENAI_API_KEY` (voice transcription) are separate credentials
 - `/login` and `/logout` can be disabled by setting `ENABLE_TELEGRAM_LOGIN=false`
 - Files uploaded via Telegram are sanitized (name, size, type) before staging in the workspace
