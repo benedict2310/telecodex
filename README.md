@@ -4,14 +4,19 @@ TeleCodex is a Telegram bridge for the OpenAI Codex CLI SDK. It keeps a Codex th
 
 ## Features
 
+- **Per-context sessions** — each Telegram chat or forum topic gets its own independent Codex session with separate thread, model, and busy state
 - **Streaming responses** — agent text edits in-place as Codex generates it
 - **Full tool visibility** — shell commands, file changes, web searches, MCP calls, and error items shown with configurable verbosity
 - **Live plan display** — Codex's todo list rendered as a separate message and updated as steps complete
 - **Voice transcription** — send a voice message or audio file; TeleCodex transcribes it (local parakeet-coreml or OpenAI Whisper) and forwards the text to Codex
 - **Image input** — send a photo (with optional caption) to pass screenshots or images directly to Codex
-- **Session browser** — `/sessions` lists recent threads from `~/.codex`, grouped by workspace; tap to switch or use `/switch <thread-id>` directly
+- **File ingest & artifacts** — send a document to stage it for Codex; generated files are delivered back as Telegram documents
+- **Session browser** — `/sessions` lists recent threads from `~/.codex`, grouped by workspace; tap to switch
+- **Telegram login** — `/login` authenticates against the Codex CLI via device auth flow, no terminal needed
 - **Model picker** — `/model` shows available models and lets you switch for new threads
 - **Reasoning effort** — `/effort` lets you dial from `minimal` to `xhigh` for new threads
+- **Message reactions** — 👀 while processing, 👍 on success; silently degrades in chats without reaction support
+- **Friendly errors** — common SDK and network errors are translated to actionable messages with command hints
 - **Token usage** — turn and session token counts shown in the final message and on `/session`
 - **Handback flow** — `/handback` prints a ready-to-run `codex resume <id>` command (copied to clipboard on macOS)
 - **User allowlist** — only configured Telegram user IDs can interact with the bot
@@ -23,7 +28,7 @@ TeleCodex is a Telegram bridge for the OpenAI Codex CLI SDK. It keeps a Codex th
 - A Telegram bot token from [@BotFather](https://t.me/BotFather)
 - The Codex CLI installed and authenticated on the host:
   - API key auth: set `CODEX_API_KEY`
-  - ChatGPT login: `codex login` on the machine
+  - ChatGPT login: `codex login` on the machine, or use `/login` from Telegram
 - *(Optional)* `ffmpeg` — required for local voice transcription via parakeet-coreml
 - *(Optional)* `OPENAI_API_KEY` — enables OpenAI Whisper as a voice transcription fallback
 
@@ -50,6 +55,8 @@ TeleCodex is a Telegram bridge for the OpenAI Codex CLI SDK. It keeps a Codex th
    | `CODEX_SANDBOX_MODE` | — | `read-only`, `workspace-write` *(default)*, `danger-full-access` |
    | `CODEX_APPROVAL_POLICY` | — | `never` *(default)*, `on-request`, `on-failure`, `untrusted` |
    | `TOOL_VERBOSITY` | — | `all`, `summary` *(default)*, `errors-only`, `none` |
+   | `MAX_FILE_SIZE` | — | Max upload size in bytes (default `20971520` = 20 MB) |
+   | `ENABLE_TELEGRAM_LOGIN` | — | Allow `/login` and `/logout` from Telegram (`true` by default) |
    | `OPENAI_API_KEY` | — | Enables OpenAI Whisper voice transcription fallback |
 
 4. Start the bot:
@@ -61,21 +68,28 @@ TeleCodex is a Telegram bridge for the OpenAI Codex CLI SDK. It keeps a Codex th
 
 | Command | Description |
 |---|---|
-| `/start` | Welcome message, current thread info, and voice/image status |
-| `/new` | Start a fresh thread (shows workspace picker if multiple workspaces known) |
-| `/abort` | Cancel the current turn |
-| `/session` | Thread ID, workspace, model, reasoning effort, and session token totals |
+| `/start` | Welcome & status (concise for returning users) |
+| `/help` | Grouped command reference |
+| `/new` | Start a fresh thread (workspace picker if multiple workspaces) |
+| `/session` | Current thread ID, workspace, model, effort, and token totals |
 | `/sessions` | Browse recent threads grouped by workspace; tap to switch |
-| `/switch <id>` | Switch directly to a thread by ID without the picker |
-| `/handback` | Hand the thread back to the CLI; prints `codex resume <id>` |
-| `/model` | View and change the model for new threads |
+| `/switch <id>` | Switch directly to a thread by ID |
+| `/retry` | Resend the last prompt |
+| `/abort` | Cancel the current turn |
+| `/model` | View and change the model |
 | `/effort` | Set reasoning effort: `minimal` · `low` · `medium` · `high` · `xhigh` |
+| `/auth` | Check authentication status |
+| `/login` | Start Codex device-auth flow from Telegram |
+| `/logout` | Sign out of Codex |
 | `/voice` | Check voice transcription backend status |
+| `/handback` | Print `codex resume <id>` for CLI handoff |
+| `/attach <id>` | Bind an existing Codex thread to this forum topic |
 
-### Voice & image input
+### Voice, image & file input
 
 - **Voice / audio** — send any voice message or audio file; TeleCodex transcribes it and sends the result to Codex
 - **Photos** — send a photo with an optional caption; the image is forwarded to Codex as visual input
+- **Documents** — send a file (with optional caption); TeleCodex stages it in the workspace, runs Codex, and delivers any generated files back as Telegram documents
 
 ### Tool verbosity
 
@@ -86,14 +100,34 @@ TeleCodex is a Telegram bridge for the OpenAI Codex CLI SDK. It keeps a Codex th
 | `errors-only` | Only failed tool calls |
 | `none` | Silent |
 
-### Session switching
+## Multi-Session Architecture
+
+Each Telegram chat or forum topic is identified by a **context key** — the chat ID alone for private chats, or `chatId:threadId` for forum topics. This means every topic in a supergroup gets its own independent Codex session.
+
+The `SessionRegistry` maps context keys to `CodexSessionService` instances:
 
 ```
-/sessions          — picker showing last 10 threads, grouped by workspace
-/switch abc123     — resume thread abc123 immediately
+┌───────────────────┐      ┌───────────────────────────────┐
+│ Private Chat A     │─────▶│ CodexSessionService (thread X) │
+│ key: "111"         │      └───────────────────────────────┘
+├───────────────────┤      ┌───────────────────────────────┐
+│ Group B / Topic 1  │─────▶│ CodexSessionService (thread Y) │
+│ key: "222:1"       │      └───────────────────────────────┘
+├───────────────────┤      ┌───────────────────────────────┐
+│ Group B / Topic 2  │─────▶│ CodexSessionService (thread Z) │
+│ key: "222:2"       │      └───────────────────────────────┘
+└───────────────────┘
 ```
 
-Threads come from `~/.codex/state_*.sqlite`. TeleCodex reads the database directly; no extra configuration needed.
+- **First message** in a context → creates a new `CodexSessionService` → starts a new Codex thread
+- **Subsequent messages** → same context key → same session → conversation continues
+- **`/new`** → replaces the thread within the same context (optionally picking a workspace first)
+- **`/sessions`** → lists all Codex threads from `~/.codex`, lets you switch within the current context
+- **`/attach <id>`** → resumes a specific Codex CLI thread (useful for picking up work started in the terminal)
+
+Session metadata (thread ID, workspace, model, effort) is persisted to `.telecodex/contexts.json` and restored on restart so threads survive bot reboots.
+
+Each context has independent busy-state tracking, so a running prompt in one topic doesn't block another.
 
 ## Handoff: Telegram → CLI
 
@@ -112,7 +146,7 @@ On macOS the command is also copied to the clipboard automatically.
 Telegram ←→ Grammy bot (auto-retry, HTML formatting, inline keyboards)
                 |
                 v
-        CodexSessionService
+        SessionRegistry  ──→  per-context CodexSessionService instances
                 |
                 ├── @openai/codex-sdk  ──→  spawns Codex CLI subprocess
                 │     └── ThreadEvents (agent text, commands, file changes,
@@ -120,6 +154,9 @@ Telegram ←→ Grammy bot (auto-retry, HTML formatting, inline keyboards)
                 │                       reasoning, errors, token usage)
                 ├── CodexStateReader  ──→  ~/.codex/state_*.sqlite  (threads)
                 │                    ──→  ~/.codex/models_cache.json (models)
+                ├── CodexAuth        ──→  codex login/logout subprocess
+                ├── Attachments      ──→  .telecodex/inbox/<turnId>/ (staged files)
+                ├── Artifacts        ──→  .telecodex/outbox/<turnId>/ (generated files)
                 └── VoiceTranscriber  ──→  parakeet-coreml (local)
                                      ──→  OpenAI Whisper (cloud fallback)
 ```
@@ -131,18 +168,19 @@ TeleCodex/
 ├── src/
 │   ├── index.ts           — startup, signal handling, polling loop
 │   ├── bot.ts             — Telegram bot, all commands and handlers
+│   ├── bot-ui.ts          — pure render helpers (/help, /start, session labels)
 │   ├── codex-session.ts   — CodexSessionService wrapping the SDK
 │   ├── codex-state.ts     — SQLite reader for thread/model discovery
+│   ├── codex-auth.ts      — Codex CLI auth (login status, device auth, logout)
+│   ├── session-registry.ts — per-context session map with persistence
+│   ├── context-key.ts     — Telegram chat/topic → context key derivation
+│   ├── attachments.ts     — file staging (sanitization, size limits)
+│   ├── artifacts.ts       — generated file collection and Telegram delivery
+│   ├── error-messages.ts  — SDK/network error → user-friendly translation
 │   ├── voice.ts           — voice transcription (parakeet / Whisper)
 │   ├── config.ts          — environment loading and validation
 │   └── format.ts          — Markdown → Telegram HTML conversion
-├── test/
-│   ├── codex-session.test.ts
-│   ├── codex-state.test.ts
-│   ├── voice.test.ts
-│   ├── voice.decode.test.ts
-│   ├── config.test.ts
-│   └── format.test.ts
+├── test/                  — 14 test files, 180+ tests (vitest)
 ├── .env.example
 ├── Dockerfile
 ├── docker-compose.yml
@@ -176,5 +214,7 @@ npm test         # run vitest
 - Default sandbox mode is `workspace-write` — Codex can read and write within the working directory
 - Use `danger-full-access` only if you fully trust the user and the host environment
 - Default approval policy is `never` — suited for headless/automated use
-- `OPENAI_API_KEY` (voice transcription) is separate from `CODEX_API_KEY` (agent auth)
+- `CODEX_API_KEY` (agent auth) and `OPENAI_API_KEY` (voice transcription) are separate credentials
+- `/login` and `/logout` can be disabled by setting `ENABLE_TELEGRAM_LOGIN=false`
+- Files uploaded via Telegram are sanitized (name, size, type) before staging in the workspace
 - All Markdown output is sanitized before being sent as Telegram HTML
