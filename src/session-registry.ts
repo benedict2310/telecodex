@@ -51,6 +51,10 @@ export class SessionRegistry {
     return this.sessions.has(contextKey);
   }
 
+  hasMetadata(contextKey: TelegramContextKey): boolean {
+    return this.metadata.has(contextKey);
+  }
+
   updateMetadata(contextKey: TelegramContextKey, session: CodexSessionService): void {
     const info = session.getInfo();
     this.metadata.set(contextKey, {

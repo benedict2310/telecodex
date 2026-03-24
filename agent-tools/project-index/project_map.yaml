@@ -1,0 +1,68 @@
+architecture_hints:
+  asr_engines_detected: []
+  notes:
+    - Xcode project is generated via XcodeGen (project.yml).
+    - Skip build/DerivedData and hidden directories for indexing; regenerate index after refactors.
+  swift_protocols_detected: []
+commands:
+  build_only: ./build.sh
+  clean: ./build.sh clean
+  dev_loop: ./build.sh run
+  tests: xcodebuild test -project MacTalk.xcodeproj -scheme MacTalk
+  xcodegen: xcodegen generate
+exclusions:
+  also_skipped:
+    - Vendor/whisper.cpp/build
+  max_bytes_per_file: 524288
+  skip_dir_names:
+    - .build
+    - .swiftpm
+    - Build
+    - DerivedData
+    - __pycache__
+    - build
+    - node_modules
+    - xcuserdata
+  skip_file_names:
+    - .DS_Store
+  skip_hidden: true
+generated_at: "2026-03-23T21:21:22-04:00"
+git:
+  branch: main
+  commit: 82f0f42229b962f451373215606e040ca1acedf5
+  dirty: true
+  remotes:
+    - "origin\thttps://github.com/benedict2310/telecodex.git (fetch)"
+    - "origin\thttps://github.com/benedict2310/telecodex.git (push)"
+high_level_structure:
+  -     path: MacTalk/MacTalk
+        role: Main macOS app source (Swift/AppKit)
+  -     path: MacTalk/MacTalkTests
+        role: XCTest test target
+  -     path: Vendor/whisper.cpp
+        role: C++ inference engine submodule
+  -     path: scripts
+        role: Build/sign helpers
+  -     path: docs
+        role: Architecture + planning docs
+key_paths:
+  - AGENTS.md
+  - README.md
+repo_root: /Users/bene/Dev-Source-NoBackup/TeleCodex
+stats:
+  category_stats:
+    Docs: 4
+    Other: 52
+  file_count: 56
+  key_files:
+    -       hint: Contributor/agent workflow and architecture context.
+            path: AGENTS.md
+  language_stats:
+    JSON: 3
+    Markdown: 7
+    Unknown: 45
+    YAML: 1
+  swift_asr_engines: []
+  swift_protocols: []
+  top_swift_files_by_loc: []
+  truncated_file_count: 0
