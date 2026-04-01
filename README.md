@@ -18,7 +18,7 @@ TeleCodex is a Telegram bridge for the OpenAI Codex CLI SDK. It keeps a Codex th
 - **Reasoning effort** — `/effort` lets you dial from `minimal` to `xhigh` for new threads
 - **Message reactions** — 👀 while processing, 👍 on success; silently degrades in chats without reaction support
 - **Friendly errors** — common SDK and network errors are translated to actionable messages with command hints
-- **Token usage** — turn and session token counts shown in the final message and on `/session`
+- **Token usage** — session token totals shown on `/session`, with optional per-turn footer in replies
 - **Handback flow** — `/handback` prints a ready-to-run `codex resume <id>` command (copied to clipboard on macOS)
 - **User allowlist** — only configured Telegram user IDs can interact with the bot
 - **Docker-friendly** — workspace auto-detected (`/workspace` in containers, `cwd` otherwise)
@@ -59,6 +59,7 @@ TeleCodex is a Telegram bridge for the OpenAI Codex CLI SDK. It keeps a Codex th
    | `CODEX_DEFAULT_LAUNCH_PROFILE` | — | Default launch profile id (defaults to `default`) |
    | `ENABLE_UNSAFE_LAUNCH_PROFILES` | — | Set to `true` to allow extra `danger-full-access` launch profiles |
    | `TOOL_VERBOSITY` | — | `all`, `summary` *(default)*, `errors-only`, `none` |
+   | `SHOW_TURN_TOKEN_USAGE` | — | Show the per-turn `in/cached/out` footer in final replies (`false` by default) |
    | `MAX_FILE_SIZE` | — | Max upload size in bytes (default `20971520` = 20 MB) |
    | `ENABLE_TELEGRAM_LOGIN` | — | Allow `/login` and `/logout` from Telegram (`true` by default) |
    | `OPENAI_API_KEY` | — | Enables OpenAI Whisper voice transcription fallback |
@@ -101,9 +102,11 @@ TeleCodex is a Telegram bridge for the OpenAI Codex CLI SDK. It keeps a Codex th
 | Mode | What you see |
 |---|---|
 | `all` | Every tool start, streaming output, and result |
-| `summary` *(default)* | A one-line count at the end: `🔧 3 tools used: shell ×2, file_change` |
+| `summary` *(default)* | A short grouped footer such as `Tools used: 3x bash, 2x subagents, web_fetch` |
 | `errors-only` | Only failed tool calls |
 | `none` | Silent |
+
+Per-turn token usage is hidden by default. Set `SHOW_TURN_TOKEN_USAGE=true` if you want the `in / cached / out` footer appended to final replies.
 
 ### Launch profiles
 

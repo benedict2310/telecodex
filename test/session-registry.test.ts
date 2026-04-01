@@ -108,6 +108,7 @@ describe("SessionRegistry", () => {
     defaultLaunchProfileId: "default",
     enableUnsafeLaunchProfiles: false,
     toolVerbosity: "summary",
+    showTurnTokenUsage: false,
     enableTelegramLogin: true,
     ...overrides,
   });

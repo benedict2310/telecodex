@@ -328,7 +328,8 @@ export function createBot(config: TeleCodexConfig, registry: SessionRegistry): B
 
     const buildFinalResponseText = (text: string): string => {
       const trimmedText = text.trim();
-      const usageLine = lastTurnUsage ? formatTurnUsageLine(lastTurnUsage) : "";
+      const usageLine =
+        config.showTurnTokenUsage && lastTurnUsage ? formatTurnUsageLine(lastTurnUsage) : "";
 
       if (toolVerbosity === "summary") {
         const footerLines = [formatToolSummaryLine(toolCounts), usageLine].filter((line): line is string => Boolean(line));
@@ -2212,21 +2213,25 @@ function renderToolEndMessage(toolName: string, partialResult: string, isError: 
   };
 }
 
-function formatToolSummaryLine(toolCounts: Map<string, number>): string {
+export function formatToolSummaryLine(toolCounts: Map<string, number>): string {
   if (toolCounts.size === 0) {
     return "";
   }
 
-  const entries = [...toolCounts.entries()].sort((left, right) => {
+  const summarizedCounts = new Map<string, number>();
+  for (const [toolName, count] of toolCounts.entries()) {
+    const summaryName = summarizeToolName(toolName);
+    summarizedCounts.set(summaryName, (summarizedCounts.get(summaryName) ?? 0) + count);
+  }
+
+  const entries = [...summarizedCounts.entries()].sort((left, right) => {
     const countDelta = right[1] - left[1];
     return countDelta !== 0 ? countDelta : left[0].localeCompare(right[0]);
   });
-  const totalCount = entries.reduce((sum, [, count]) => sum + count, 0);
-  const label = totalCount === 1 ? "tool used" : "tools used";
   const tools = entries
-    .map(([name, count]) => (count === 1 ? name : `${name} ×${count}`))
+    .map(([name, count]) => formatSummaryEntry(name, count))
     .join(", ");
-  return `🔧 ${totalCount} ${label}: ${tools}`;
+  return `Tools used: ${tools}`;
 }
 
 function renderTodoList(items: Array<{ text: string; completed: boolean }>): string {
@@ -2237,9 +2242,44 @@ function renderTodoList(items: Array<{ text: string; completed: boolean }>): str
   return `📋 <b>Plan</b>\n${lines.join("\n")}`;
 }
 
-function formatTurnUsageLine(usage: { inputTokens: number; cachedInputTokens: number; outputTokens: number }): string {
+export function formatTurnUsageLine(usage: { inputTokens: number; cachedInputTokens: number; outputTokens: number }): string {
   return `🪙 in: ${usage.inputTokens} · cached: ${usage.cachedInputTokens} · out: ${usage.outputTokens}`;
 }
+
+export function summarizeToolName(toolName: string): string {
+  if (toolName.startsWith("🔍 ")) {
+    return "web_fetch";
+  }
+
+  if (toolName === "file_change") {
+    return "file_change";
+  }
+
+  if (toolName === "⚠️ error") {
+    return "error";
+  }
+
+  if (toolName.startsWith("mcp:")) {
+    const tool = toolName.split("/").at(-1) ?? toolName;
+    if (SUBAGENT_TOOL_NAMES.has(tool)) {
+      return "subagent";
+    }
+    return tool;
+  }
+
+  return "bash";
+}
+
+function formatSummaryEntry(name: string, count: number): string {
+  if (count <= 1) {
+    return name;
+  }
+
+  const label = name === "subagent" ? "subagents" : name;
+  return `${count}x ${label}`;
+}
+
+const SUBAGENT_TOOL_NAMES = new Set(["spawn_agent", "send_input", "wait_agent", "close_agent", "resume_agent"]);
 
 function formatSessionTokensValue(tokens: { input: number; cached: number; output: number }): string {
   return `in: ${tokens.input} · cached: ${tokens.cached} · out: ${tokens.output}`;
