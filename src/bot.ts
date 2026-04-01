@@ -219,6 +219,10 @@ export function createBot(config: TeleCodexConfig, registry: SessionRegistry): B
   };
 
   const setReaction = async (ctx: Context, emoji: "👀" | "👍" | "❤" | "🔥" | "👏"): Promise<void> => {
+    if (!config.enableTelegramReactions) {
+      return;
+    }
+
     try {
       const chatId = ctx.chat?.id;
       const messageId = ctx.message?.message_id;
@@ -230,6 +234,10 @@ export function createBot(config: TeleCodexConfig, registry: SessionRegistry): B
   };
 
   const clearReaction = async (ctx: Context): Promise<void> => {
+    if (!config.enableTelegramReactions) {
+      return;
+    }
+
     try {
       const chatId = ctx.chat?.id;
       const messageId = ctx.message?.message_id;

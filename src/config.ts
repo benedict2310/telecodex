@@ -31,6 +31,7 @@ export interface TeleCodexConfig {
   toolVerbosity: ToolVerbosity;
   showTurnTokenUsage: boolean;
   enableTelegramLogin: boolean;
+  enableTelegramReactions: boolean;
 }
 
 export function loadConfig(): TeleCodexConfig {
@@ -61,6 +62,10 @@ export function loadConfig(): TeleCodexConfig {
   const toolVerbosity = parseToolVerbosity(optionalString(process.env.TOOL_VERBOSITY));
   const showTurnTokenUsage = parseBooleanEnv(optionalString(process.env.SHOW_TURN_TOKEN_USAGE), false);
   const enableTelegramLogin = parseBooleanEnv(optionalString(process.env.ENABLE_TELEGRAM_LOGIN), true);
+  const enableTelegramReactions = parseBooleanEnv(
+    optionalString(process.env.ENABLE_TELEGRAM_REACTIONS),
+    false,
+  );
 
   return {
     telegramBotToken,
@@ -78,6 +83,7 @@ export function loadConfig(): TeleCodexConfig {
     toolVerbosity,
     showTurnTokenUsage,
     enableTelegramLogin,
+    enableTelegramReactions,
   };
 }
 

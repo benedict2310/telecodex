@@ -29,3 +29,6 @@ PRs should explain the behavior change, note any config or Docker impact, and li
 
 ## Security & Configuration Tips
 Do not commit `.env`, API keys, or Telegram tokens. Restrict `TELEGRAM_ALLOWED_USER_IDS` to trusted users, and default to `CODEX_SANDBOX_MODE=workspace-write` unless broader access is required.
+
+## Release Automation
+TeleCodex does not yet ship with the TelePi npm release workflow, but the reusable Trusted Publishing setup has been documented in `docs/npm-trusted-publishing.md`. Use that playbook when wiring TeleCodex for npm publication and tag-driven GitHub Actions releases.

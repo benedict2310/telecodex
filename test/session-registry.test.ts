@@ -110,6 +110,7 @@ describe("SessionRegistry", () => {
     toolVerbosity: "summary",
     showTurnTokenUsage: false,
     enableTelegramLogin: true,
+    enableTelegramReactions: false,
     ...overrides,
   });
 
