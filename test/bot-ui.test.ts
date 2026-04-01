@@ -18,7 +18,7 @@ describe("bot-ui", () => {
       expect(plain).toContain("/new");
       expect(plain).toContain("/help");
       expect(plain).toContain("/retry");
-      expect(plain).toContain("/launch");
+      expect(plain).toContain("/launch_profiles");
     });
 
     it("lists all 16 commands", () => {

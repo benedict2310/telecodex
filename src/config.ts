@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 
 import {
+  createBuiltinLaunchProfiles,
   createDefaultLaunchProfile,
   findLaunchProfile,
   isCodexApprovalPolicy,
@@ -248,17 +249,19 @@ function parseLaunchProfiles(
   codexApprovalPolicy: CodexApprovalPolicy,
   enableUnsafeLaunchProfiles: boolean,
 ): CodexLaunchProfile[] {
-  const profiles = [createDefaultLaunchProfile(codexSandboxMode, codexApprovalPolicy)];
+  const defaultProfile = createDefaultLaunchProfile(codexSandboxMode, codexApprovalPolicy);
+  const profiles = createBuiltinLaunchProfiles(defaultProfile);
 
   if (!raw) {
     return profiles;
   }
 
   const parsedProfiles = parseLaunchProfilesJson(raw);
-  const seenIds = new Set(profiles.map((profile) => profile.id));
+  const profileIndexes = new Map(profiles.map((profile, index) => [profile.id, index]));
+  const explicitIds = new Set<string>();
 
   for (const profile of parsedProfiles) {
-    if (seenIds.has(profile.id)) {
+    if (profile.id === defaultProfile.id || explicitIds.has(profile.id)) {
       throw new Error(`Duplicate launch profile id: ${profile.id}`);
     }
     if (profile.unsafe && !enableUnsafeLaunchProfiles) {
@@ -266,8 +269,16 @@ function parseLaunchProfiles(
         `Unsafe launch profile "${profile.id}" requires ENABLE_UNSAFE_LAUNCH_PROFILES=true`,
       );
     }
-    profiles.push(profile);
-    seenIds.add(profile.id);
+
+    const existingIndex = profileIndexes.get(profile.id);
+    if (existingIndex === undefined) {
+      profiles.push(profile);
+      profileIndexes.set(profile.id, profiles.length - 1);
+    } else {
+      profiles[existingIndex] = profile;
+    }
+
+    explicitIds.add(profile.id);
   }
 
   return profiles;

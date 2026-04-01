@@ -1,4 +1,5 @@
 import {
+  createBuiltinLaunchProfiles,
   createDefaultLaunchProfile,
   formatLaunchProfileBehavior,
   formatLaunchProfileLabel,
@@ -102,6 +103,42 @@ describe("codex-launch", () => {
     expect(formatLaunchProfileBehavior(profile)).toBe("workspace-write / never");
     expect(formatLaunchProfileLabel(profile, true)).toContain("Default");
     expect(formatLaunchProfileLabel(profile, true)).toContain("✓");
+  });
+
+  it("adds built-in readable and writable presets without duplicating the default behavior", () => {
+    expect(createBuiltinLaunchProfiles(createDefaultLaunchProfile("workspace-write", "never"))).toEqual([
+      {
+        id: "default",
+        label: "Default",
+        sandboxMode: "workspace-write",
+        approvalPolicy: "never",
+        unsafe: false,
+      },
+      {
+        id: "readonly",
+        label: "Read Only",
+        sandboxMode: "read-only",
+        approvalPolicy: "never",
+        unsafe: false,
+      },
+    ]);
+
+    expect(createBuiltinLaunchProfiles(createDefaultLaunchProfile("read-only", "never"))).toEqual([
+      {
+        id: "default",
+        label: "Default",
+        sandboxMode: "read-only",
+        approvalPolicy: "never",
+        unsafe: false,
+      },
+      {
+        id: "workspace-write",
+        label: "Workspace Write",
+        sandboxMode: "workspace-write",
+        approvalPolicy: "never",
+        unsafe: false,
+      },
+    ]);
   });
 
   it("classifies danger-full-access as unsafe", () => {

@@ -78,6 +78,20 @@ describe("loadConfig", () => {
           approvalPolicy: "on-request",
           unsafe: true,
         },
+        {
+          id: "readonly",
+          label: "Read Only",
+          sandboxMode: "read-only",
+          approvalPolicy: "never",
+          unsafe: false,
+        },
+        {
+          id: "workspace-write",
+          label: "Workspace Write",
+          sandboxMode: "workspace-write",
+          approvalPolicy: "never",
+          unsafe: false,
+        },
       ],
       defaultLaunchProfileId: "default",
       enableUnsafeLaunchProfiles: false,
@@ -102,6 +116,13 @@ describe("loadConfig", () => {
         id: "default",
         label: "Default",
         sandboxMode: "workspace-write",
+        approvalPolicy: "never",
+        unsafe: false,
+      },
+      {
+        id: "readonly",
+        label: "Read Only",
+        sandboxMode: "read-only",
         approvalPolicy: "never",
         unsafe: false,
       },
@@ -159,6 +180,20 @@ describe("loadConfig", () => {
         label: "Default",
         sandboxMode: "read-only",
         approvalPolicy: "on-failure",
+        unsafe: false,
+      },
+      {
+        id: "readonly",
+        label: "Read Only",
+        sandboxMode: "read-only",
+        approvalPolicy: "never",
+        unsafe: false,
+      },
+      {
+        id: "workspace-write",
+        label: "Workspace Write",
+        sandboxMode: "workspace-write",
+        approvalPolicy: "never",
         unsafe: false,
       },
     ]);
@@ -234,7 +269,7 @@ describe("loadConfig", () => {
     process.env.CODEX_LAUNCH_PROFILES_JSON = JSON.stringify([
       {
         id: "readonly",
-        label: "Read Only",
+        label: "Workspace Read Only",
         sandboxMode: "read-only",
         approvalPolicy: "never",
       },
@@ -261,7 +296,7 @@ describe("loadConfig", () => {
       },
       {
         id: "readonly",
-        label: "Read Only",
+        label: "Workspace Read Only",
         sandboxMode: "read-only",
         approvalPolicy: "never",
         unsafe: false,

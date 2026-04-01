@@ -43,6 +43,40 @@ export function createDefaultLaunchProfile(
   });
 }
 
+export function createBuiltinLaunchProfiles(defaultProfile: CodexLaunchProfile): CodexLaunchProfile[] {
+  const profiles = [defaultProfile];
+  const seenBehaviors = new Set([getLaunchProfileBehaviorKey(defaultProfile)]);
+
+  const addPreset = (profile: CodexLaunchProfile): void => {
+    const key = getLaunchProfileBehaviorKey(profile);
+    if (seenBehaviors.has(key)) {
+      return;
+    }
+
+    profiles.push(profile);
+    seenBehaviors.add(key);
+  };
+
+  addPreset(
+    createLaunchProfile({
+      id: "readonly",
+      label: "Read Only",
+      sandboxMode: "read-only",
+      approvalPolicy: "never",
+    }),
+  );
+  addPreset(
+    createLaunchProfile({
+      id: "workspace-write",
+      label: "Workspace Write",
+      sandboxMode: "workspace-write",
+      approvalPolicy: "never",
+    }),
+  );
+
+  return profiles;
+}
+
 export function parseLaunchProfilesJson(raw: string): CodexLaunchProfile[] {
   let parsed: unknown;
   try {
@@ -86,6 +120,12 @@ export function isUnsafeLaunchProfile(
   const sandboxMode =
     typeof profileOrSandboxMode === "string" ? profileOrSandboxMode : profileOrSandboxMode.sandboxMode;
   return sandboxMode === "danger-full-access";
+}
+
+function getLaunchProfileBehaviorKey(
+  profile: Pick<CodexLaunchProfile, "sandboxMode" | "approvalPolicy">,
+): string {
+  return `${profile.sandboxMode}:${profile.approvalPolicy}`;
 }
 
 function parseLaunchProfileEntry(entry: unknown, index: number): CodexLaunchProfile {

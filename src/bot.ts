@@ -50,6 +50,7 @@ const FORMATTED_CHUNK_TARGET = 3000;
 const MAX_AUDIO_FILE_SIZE = 25 * 1024 * 1024;
 const KEYBOARD_PAGE_SIZE = 6;
 const NOOP_PAGE_CALLBACK_DATA = "noop_page";
+const LAUNCH_PROFILES_COMMAND = "/launch_profiles";
 
 type TelegramChatId = number | string;
 type TelegramParseMode = "HTML";
@@ -1081,7 +1082,7 @@ export function createBot(config: TeleCodexConfig, registry: SessionRegistry): B
     await safeReply(ctx, htmlLines.join("\n"), { fallbackText: plainLines.join("\n") });
   });
 
-  bot.command("launch", async (ctx) => {
+  const openLaunchProfilesPicker = async (ctx: Context): Promise<void> => {
     const chatId = ctx.chat?.id;
     if (!chatId) {
       return;
@@ -1142,7 +1143,10 @@ export function createBot(config: TeleCodexConfig, registry: SessionRegistry): B
       fallbackText: plainLines.join("\n"),
       replyMarkup: keyboard,
     });
-  });
+  };
+
+  bot.command(["launch", "launch_profiles"], openLaunchProfilesPicker);
+  bot.hears(/^\/launch-profiles(?:@\w+)?$/i, openLaunchProfilesPicker);
 
   bot.command("handback", async (ctx) => {
     const contextSession = await getContextSession(ctx, { deferThreadStart: true });
@@ -1454,7 +1458,12 @@ export function createBot(config: TeleCodexConfig, registry: SessionRegistry): B
   });
   handlePageCallback(/^sess_page_(\d+)$/, "sess", pendingSessionButtons, "Expired, run /sessions again");
   handlePageCallback(/^ws_page_(\d+)$/, "ws", pendingWorkspaceButtons, "Expired, run /new again");
-  handlePageCallback(/^launch_page_(\d+)$/, "launch", pendingLaunchButtons, "Expired, run /launch again");
+  handlePageCallback(
+    /^launch_page_(\d+)$/,
+    "launch",
+    pendingLaunchButtons,
+    `Expired, run ${LAUNCH_PROFILES_COMMAND} again`,
+  );
   handlePageCallback(/^model_page_(\d+)$/, "model", pendingModelButtons, "Expired, run /model again");
   handlePageCallback(/^effort_page_(\d+)$/, "effort", pendingEffortButtons, "Expired, run /effort again");
 
@@ -1608,7 +1617,7 @@ export function createBot(config: TeleCodexConfig, registry: SessionRegistry): B
     const launchProfileIds = pendingLaunchPicks.get(contextKey);
     const profileId = launchProfileIds?.[index];
     if (!profileId) {
-      await ctx.answerCallbackQuery({ text: "Expired, run /launch again" });
+      await ctx.answerCallbackQuery({ text: `Expired, run ${LAUNCH_PROFILES_COMMAND} again` });
       return;
     }
 
@@ -1706,16 +1715,22 @@ export function createBot(config: TeleCodexConfig, registry: SessionRegistry): B
     const { contextKey, session } = contextSession;
     const profileId = pendingUnsafeLaunchConfirmations.get(contextKey);
     if (!profileId || profileId !== confirmedProfileId) {
-      await ctx.answerCallbackQuery({ text: "Expired, run /launch again" });
+      await ctx.answerCallbackQuery({ text: `Expired, run ${LAUNCH_PROFILES_COMMAND} again` });
       return;
     }
 
     if (action === "no") {
       clearLaunchSelectionState(contextKey);
       await ctx.answerCallbackQuery({ text: "Cancelled" });
-      await safeEditMessage(bot, chatId, messageId, "<b>Launch change cancelled.</b>\n\nRun /launch again to pick another profile.", {
-        fallbackText: "Launch change cancelled.\n\nRun /launch again to pick another profile.",
-      });
+      await safeEditMessage(
+        bot,
+        chatId,
+        messageId,
+        `<b>Launch change cancelled.</b>\n\nRun ${LAUNCH_PROFILES_COMMAND} again to pick another profile.`,
+        {
+          fallbackText: `Launch change cancelled.\n\nRun ${LAUNCH_PROFILES_COMMAND} again to pick another profile.`,
+        },
+      );
       return;
     }
 
@@ -1728,9 +1743,15 @@ export function createBot(config: TeleCodexConfig, registry: SessionRegistry): B
     if (!profile) {
       clearLaunchSelectionState(contextKey);
       await ctx.answerCallbackQuery({ text: "Launch profile no longer exists" });
-      await safeEditMessage(bot, chatId, messageId, "<b>Launch profile expired.</b>\n\nRun /launch again.", {
-        fallbackText: "Launch profile expired.\n\nRun /launch again.",
-      });
+      await safeEditMessage(
+        bot,
+        chatId,
+        messageId,
+        `<b>Launch profile expired.</b>\n\nRun ${LAUNCH_PROFILES_COMMAND} again.`,
+        {
+          fallbackText: `Launch profile expired.\n\nRun ${LAUNCH_PROFILES_COMMAND} again.`,
+        },
+      );
       return;
     }
 
@@ -2110,7 +2131,7 @@ export async function registerCommands(bot: Bot<Context>): Promise<void> {
     { command: "sessions", description: "Browse & switch threads" },
     { command: "retry", description: "Resend the last prompt" },
     { command: "abort", description: "Cancel current operation" },
-    { command: "launch", description: "Select launch profile" },
+    { command: "launch_profiles", description: "Select launch profile" },
     { command: "model", description: "View & change model" },
     { command: "effort", description: "Set reasoning effort" },
     { command: "auth", description: "Check auth status" },
