@@ -88,10 +88,10 @@ describe("loadConfig", () => {
           unsafe: false,
         },
         {
-          id: "workspace-write",
-          label: "Workspace Write",
+          id: "review",
+          label: "Review",
           sandboxMode: "workspace-write",
-          approvalPolicy: "never",
+          approvalPolicy: "on-request",
           unsafe: false,
         },
       ],
@@ -128,6 +128,13 @@ describe("loadConfig", () => {
         label: "Read Only",
         sandboxMode: "read-only",
         approvalPolicy: "never",
+        unsafe: false,
+      },
+      {
+        id: "review",
+        label: "Review",
+        sandboxMode: "workspace-write",
+        approvalPolicy: "on-request",
         unsafe: false,
       },
     ]);
@@ -196,10 +203,10 @@ describe("loadConfig", () => {
         unsafe: false,
       },
       {
-        id: "workspace-write",
-        label: "Workspace Write",
+        id: "review",
+        label: "Review",
         sandboxMode: "workspace-write",
-        approvalPolicy: "never",
+        approvalPolicy: "on-request",
         unsafe: false,
       },
     ]);
@@ -354,6 +361,20 @@ describe("loadConfig", () => {
         sandboxMode: "read-only",
         approvalPolicy: "never",
         unsafe: false,
+      },
+      {
+        id: "review",
+        label: "Review",
+        sandboxMode: "workspace-write",
+        approvalPolicy: "on-request",
+        unsafe: false,
+      },
+      {
+        id: "full-access",
+        label: "Full Access",
+        sandboxMode: "danger-full-access",
+        approvalPolicy: "never",
+        unsafe: true,
       },
       {
         id: "danger-full",

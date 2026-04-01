@@ -259,7 +259,9 @@ function parseLaunchProfiles(
   enableUnsafeLaunchProfiles: boolean,
 ): CodexLaunchProfile[] {
   const defaultProfile = createDefaultLaunchProfile(codexSandboxMode, codexApprovalPolicy);
-  const profiles = createBuiltinLaunchProfiles(defaultProfile);
+  const profiles = createBuiltinLaunchProfiles(defaultProfile, {
+    includeFullAccess: enableUnsafeLaunchProfiles,
+  });
 
   if (!raw) {
     return profiles;

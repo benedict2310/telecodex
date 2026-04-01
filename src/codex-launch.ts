@@ -43,36 +43,36 @@ export function createDefaultLaunchProfile(
   });
 }
 
-export function createBuiltinLaunchProfiles(defaultProfile: CodexLaunchProfile): CodexLaunchProfile[] {
-  const profiles = [defaultProfile];
-  const seenBehaviors = new Set([getLaunchProfileBehaviorKey(defaultProfile)]);
-
-  const addPreset = (profile: CodexLaunchProfile): void => {
-    const key = getLaunchProfileBehaviorKey(profile);
-    if (seenBehaviors.has(key)) {
-      return;
-    }
-
-    profiles.push(profile);
-    seenBehaviors.add(key);
-  };
-
-  addPreset(
+export function createBuiltinLaunchProfiles(
+  defaultProfile: CodexLaunchProfile,
+  options?: { includeFullAccess?: boolean },
+): CodexLaunchProfile[] {
+  const profiles = [
+    defaultProfile,
     createLaunchProfile({
       id: "readonly",
       label: "Read Only",
       sandboxMode: "read-only",
       approvalPolicy: "never",
     }),
-  );
-  addPreset(
     createLaunchProfile({
-      id: "workspace-write",
-      label: "Workspace Write",
+      id: "review",
+      label: "Review",
       sandboxMode: "workspace-write",
-      approvalPolicy: "never",
+      approvalPolicy: "on-request",
     }),
-  );
+  ];
+
+  if (options?.includeFullAccess) {
+    profiles.push(
+      createLaunchProfile({
+        id: "full-access",
+        label: "Full Access",
+        sandboxMode: "danger-full-access",
+        approvalPolicy: "never",
+      }),
+    );
+  }
 
   return profiles;
 }
@@ -120,12 +120,6 @@ export function isUnsafeLaunchProfile(
   const sandboxMode =
     typeof profileOrSandboxMode === "string" ? profileOrSandboxMode : profileOrSandboxMode.sandboxMode;
   return sandboxMode === "danger-full-access";
-}
-
-function getLaunchProfileBehaviorKey(
-  profile: Pick<CodexLaunchProfile, "sandboxMode" | "approvalPolicy">,
-): string {
-  return `${profile.sandboxMode}:${profile.approvalPolicy}`;
 }
 
 function parseLaunchProfileEntry(entry: unknown, index: number): CodexLaunchProfile {

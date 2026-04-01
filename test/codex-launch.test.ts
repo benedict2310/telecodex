@@ -105,7 +105,7 @@ describe("codex-launch", () => {
     expect(formatLaunchProfileLabel(profile, true)).toContain("✓");
   });
 
-  it("adds built-in readable and writable presets without duplicating the default behavior", () => {
+  it("always exposes read-only and review presets, plus optional full access", () => {
     expect(createBuiltinLaunchProfiles(createDefaultLaunchProfile("workspace-write", "never"))).toEqual([
       {
         id: "default",
@@ -121,22 +121,47 @@ describe("codex-launch", () => {
         approvalPolicy: "never",
         unsafe: false,
       },
+      {
+        id: "review",
+        label: "Review",
+        sandboxMode: "workspace-write",
+        approvalPolicy: "on-request",
+        unsafe: false,
+      },
     ]);
 
-    expect(createBuiltinLaunchProfiles(createDefaultLaunchProfile("read-only", "never"))).toEqual([
+    expect(
+      createBuiltinLaunchProfiles(createDefaultLaunchProfile("workspace-write", "never"), {
+        includeFullAccess: true,
+      }),
+    ).toEqual([
       {
         id: "default",
         label: "Default",
+        sandboxMode: "workspace-write",
+        approvalPolicy: "never",
+        unsafe: false,
+      },
+      {
+        id: "readonly",
+        label: "Read Only",
         sandboxMode: "read-only",
         approvalPolicy: "never",
         unsafe: false,
       },
       {
-        id: "workspace-write",
-        label: "Workspace Write",
+        id: "review",
+        label: "Review",
         sandboxMode: "workspace-write",
-        approvalPolicy: "never",
+        approvalPolicy: "on-request",
         unsafe: false,
+      },
+      {
+        id: "full-access",
+        label: "Full Access",
+        sandboxMode: "danger-full-access",
+        approvalPolicy: "never",
+        unsafe: true,
       },
     ]);
   });

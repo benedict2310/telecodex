@@ -112,7 +112,12 @@ Per-turn token usage is hidden by default. Set `SHOW_TURN_TOKEN_USAGE=true` if y
 ### Launch profiles
 
 - TeleCodex always provides a built-in `default` profile synthesized from `CODEX_SANDBOX_MODE` and `CODEX_APPROVAL_POLICY`
-- It also adds safe built-in presets for `Read Only` and `Workspace Write`, skipping duplicates of the default behavior
+- Built-in Telegram-visible presets are:
+  - `Default`
+  - `Read Only`
+  - `Review`
+  - `Full Access` when `ENABLE_UNSAFE_LAUNCH_PROFILES=true`
+- `Workspace Write` is not listed separately because it is already the default behavior in the shipped config
 - Optional extra profiles can be configured with `CODEX_LAUNCH_PROFILES_JSON`, for example:
   ```json
   [
@@ -251,7 +256,7 @@ That playbook covers:
 - Only users in `TELEGRAM_ALLOWED_USER_IDS` can interact with the bot
 - Default sandbox mode is `workspace-write` — Codex can read and write within the working directory
 - Use `danger-full-access` only if you fully trust the user and the host environment
-- Extra `danger-full-access` launch profiles are opt-in via `ENABLE_UNSAFE_LAUNCH_PROFILES=true`
+- The built-in `Full Access` profile and any extra `danger-full-access` launch profiles are opt-in via `ENABLE_UNSAFE_LAUNCH_PROFILES=true`
 - Default approval policy is `never` — suited for headless/automated use
 - `/launch_profiles` only selects from validated configured profiles; Telegram users cannot submit arbitrary sandbox or approval values
 - `CODEX_API_KEY` (agent auth) and `OPENAI_API_KEY` (voice transcription) are separate credentials
